@@ -1,0 +1,8 @@
+{
+  "bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
+  "jellyfin_url": "http://192.168.29.29:8082",
+  "jellyfin_api_key": "YOUR_JELLYFIN_API_KEY",
+  "admin_file": "admins.json",
+  "users_file": "users.json",
+  "pending_file": "pending.json"
+}
