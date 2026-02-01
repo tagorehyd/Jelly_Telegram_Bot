@@ -287,14 +287,76 @@ def bootstrap_users_from_server():
 # -------------------------------------------------
 
 def setup_logging():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[
-            logging.FileHandler("bot.log"),
-            logging.StreamHandler(sys.stdout)
-        ]
+    """Setup comprehensive logging system with separate info and debug logs"""
+    
+    # Create logs directory if it doesn't exist
+    Path("logs").mkdir(exist_ok=True)
+    
+    # Create formatters
+    detailed_formatter = logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(funcName)-20s | Line %(lineno)-4d | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
     )
+    
+    simple_formatter = logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # Get root logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)  # Capture everything
+    
+    # Remove any existing handlers
+    logger.handlers.clear()
+    
+    # Handler 1: Console output (INFO and above)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(simple_formatter)
+    logger.addHandler(console_handler)
+    
+    # Handler 2: General log file (INFO and above)
+    info_handler = logging.FileHandler("logs/bot.log", encoding='utf-8')
+    info_handler.setLevel(logging.INFO)
+    info_handler.setFormatter(simple_formatter)
+    logger.addHandler(info_handler)
+    
+    # Handler 3: Debug log file (ALL messages including DEBUG)
+    debug_handler = logging.FileHandler("logs/debug.log", encoding='utf-8')
+    debug_handler.setLevel(logging.DEBUG)
+    debug_handler.setFormatter(detailed_formatter)
+    logger.addHandler(debug_handler)
+    
+    # Handler 4: Error log file (ERROR and CRITICAL only)
+    error_handler = logging.FileHandler("logs/error.log", encoding='utf-8')
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(detailed_formatter)
+    logger.addHandler(error_handler)
+    
+    # Handler 5: User activity log (custom logger for tracking all user interactions)
+    activity_logger = logging.getLogger('user_activity')
+    activity_logger.setLevel(logging.DEBUG)
+    activity_logger.propagate = False  # Don't propagate to root logger
+    
+    activity_handler = logging.FileHandler("logs/user_activity.log", encoding='utf-8')
+    activity_handler.setLevel(logging.DEBUG)
+    activity_formatter = logging.Formatter(
+        '%(asctime)s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    activity_handler.setFormatter(activity_formatter)
+    activity_logger.addHandler(activity_handler)
+    
+    logging.info("=" * 80)
+    logging.info("LOGGING SYSTEM INITIALIZED")
+    logging.info("=" * 80)
+    logging.info(f"Console Output: INFO level and above")
+    logging.info(f"General Log: logs/bot.log (INFO+)")
+    logging.info(f"Debug Log: logs/debug.log (ALL messages)")
+    logging.info(f"Error Log: logs/error.log (ERROR+)")
+    logging.info(f"Activity Log: logs/user_activity.log (All user interactions)")
+    logging.info("=" * 80)
 
 def save_json(filepath, data):
     filepath.parent.mkdir(parents=True, exist_ok=True)
@@ -1851,13 +1913,24 @@ def handle_admin_unlink(chat_id, tg_id, args):
 
 def handle_update(update):
     """Process incoming Telegram updates"""
+    activity_logger = logging.getLogger('user_activity')
+    
     try:
+        # Log the raw update for debugging
+        logging.debug(f"Received update: {json.dumps(update, indent=2)}")
+        
         # Handle callback queries (button presses)
         if "callback_query" in update:
             callback = update["callback_query"]
             chat_id = callback["message"]["chat"]["id"]
             tg_id = callback["from"]["id"]
+            username = callback["from"].get("username", "N/A")
+            first_name = callback["from"].get("first_name", "User")
             data = callback["data"]
+            
+            # Log callback query
+            activity_logger.info(f"CALLBACK | User: {first_name} (@{username}) | TG_ID: {tg_id} | Data: {data}")
+            logging.debug(f"Callback from user {tg_id} (@{username}): {data}")
             
             # Plan selection
             if data.startswith("plan:"):
@@ -2275,28 +2348,48 @@ def handle_update(update):
             chat_id = message["chat"]["id"]
             tg_id = message["from"]["id"]
             first_name = message["from"].get("first_name", "User")
-            username = message["from"].get("username")
+            username = message["from"].get("username", "N/A")
+            
+            # Log all incoming messages
+            message_text = message.get("text", "")
+            message_type = "text"
+            if "photo" in message:
+                message_type = "photo"
+            elif "video" in message:
+                message_type = "video"
+            elif "document" in message:
+                message_type = "document"
+            
+            activity_logger.info(f"MESSAGE | User: {first_name} (@{username}) | TG_ID: {tg_id} | Type: {message_type} | Content: {message_text[:100]}")
+            logging.debug(f"Message from {tg_id} (@{username}): Type={message_type}, Text={message_text}")
             
             is_admin = str(tg_id) in admins
+            logging.debug(f"User {tg_id} admin status: {is_admin}")
             
             # Handle username input during registration
             if tg_id in awaiting_username and "text" in message:
                 text = message["text"].strip()
                 
+                logging.debug(f"User {tg_id} is in registration flow, provided username: {text}")
+                activity_logger.info(f"REGISTRATION_INPUT | User: {first_name} (@{username}) | TG_ID: {tg_id} | Username: {text}")
+                
                 # Allow cancel
                 if text.lower() == "/cancel":
                     awaiting_username.pop(tg_id, None)
                     send_message(chat_id, "✅ Registration cancelled.")
+                    logging.info(f"User {tg_id} cancelled registration")
                     return
                 
                 # Validate username format
                 is_valid, error_msg = validate_username(text)
                 if not is_valid:
+                    logging.debug(f"Invalid username from {tg_id}: {error_msg}")
                     send_message(chat_id, f"❌ Invalid username: {error_msg}\n\nPlease try again or send /cancel to cancel.")
                     return
                 
                 # Check availability
                 if not check_username_availability(text):
+                    logging.debug(f"Username '{text}' already taken, requested by {tg_id}")
                     send_message(chat_id, 
                         f"❌ Username '{text}' is already taken.\n\n"
                         f"Please choose a different username or send /cancel to cancel.")
@@ -2476,75 +2569,112 @@ def handle_update(update):
                 text = message["text"]
                 cmd = text.split()[0].lower()
                 
+                # Log command execution
+                activity_logger.info(f"COMMAND | User: {first_name} (@{username}) | TG_ID: {tg_id} | Command: {cmd} | Full: {text}")
+                logging.debug(f"Processing command from {tg_id}: {text}")
+                
                 if cmd == "/cancel":
                     broadcast_mode.pop(tg_id, None)
                     target_broadcast.pop(tg_id, None)
                     awaiting_username.pop(tg_id, None)
                     send_message(chat_id, "✅ Cancelled.")
+                    logging.info(f"User {tg_id} cancelled current operation")
                     return
                 
                 if cmd == "/start":
+                    logging.debug(f"Executing /start for user {tg_id}")
                     handle_start(chat_id, tg_id, first_name)
                 elif cmd == "/register":
+                    logging.debug(f"Executing /register for user {tg_id}")
                     handle_register(chat_id, tg_id, username, first_name)
                 elif cmd == "/subscribe":
+                    logging.debug(f"Executing /subscribe for user {tg_id}")
                     handle_subscribe(chat_id, tg_id)
                 elif cmd == "/status":
+                    logging.debug(f"Executing /status for user {tg_id}")
                     handle_status(chat_id, tg_id)
                 elif cmd == "/resetpw":
+                    logging.debug(f"Executing /resetpw for user {tg_id}")
                     handle_resetpw(chat_id, tg_id)
                 elif cmd == "/pending":
+                    logging.debug(f"Executing /pending for admin {tg_id}")
                     handle_pending(chat_id, tg_id)
                 elif cmd == "/users":
+                    logging.debug(f"Executing /users for admin {tg_id}")
                     handle_users(chat_id, tg_id)
                 elif cmd == "/broadcast":
+                    logging.debug(f"Executing /broadcast for admin {tg_id}")
                     handle_broadcast(chat_id, tg_id)
                 elif cmd == "/message":
                     parts = text.split(maxsplit=1)
                     if len(parts) < 2:
                         send_message(chat_id, "❌ Usage: /message <username>")
+                        logging.debug(f"Invalid /message usage from {tg_id}")
                     else:
+                        logging.debug(f"Executing /message for admin {tg_id} to {parts[1]}")
                         handle_message_user(chat_id, tg_id, parts[1])
                 elif cmd == "/stats":
+                    logging.debug(f"Executing /stats for admin {tg_id}")
                     handle_stats(chat_id, tg_id)
                 elif cmd == "/payments":
+                    logging.debug(f"Executing /payments for admin {tg_id}")
                     handle_payments(chat_id, tg_id)
                 elif cmd == "/subinfo":
                     parts = text.split(maxsplit=1)
                     if len(parts) < 2:
                         send_message(chat_id, "❌ Usage: /subinfo <username>")
+                        logging.debug(f"Invalid /subinfo usage from {tg_id}")
                     else:
+                        logging.debug(f"Executing /subinfo for admin {tg_id} on user {parts[1]}")
                         handle_subinfo(chat_id, tg_id, parts[1])
                 elif cmd == "/subextend":
                     parts = text.split()
                     if len(parts) < 3:
                         send_message(chat_id, "❌ Usage: /subextend <username> <days>")
+                        logging.debug(f"Invalid /subextend usage from {tg_id}")
                     else:
+                        logging.debug(f"Executing /subextend for admin {tg_id}: {parts[1]} +{parts[2]} days")
                         handle_subextend(chat_id, tg_id, parts[1:])
                 elif cmd == "/subend":
                     parts = text.split(maxsplit=1)
                     if len(parts) < 2:
                         send_message(chat_id, "❌ Usage: /subend <username>")
+                        logging.debug(f"Invalid /subend usage from {tg_id}")
                     else:
+                        logging.debug(f"Executing /subend for admin {tg_id} on user {parts[1]}")
                         handle_subend(chat_id, tg_id, parts[1])
                 elif cmd == "/linkme":
                     parts = text.split(maxsplit=1)
                     if len(parts) < 2:
                         send_message(chat_id, "❌ Usage: /linkme <username>")
+                        logging.debug(f"Invalid /linkme usage from {tg_id}")
                     else:
+                        logging.debug(f"Executing /linkme for user {tg_id} with username {parts[1]}")
                         handle_linkme(chat_id, tg_id, parts[1], first_name)
                 elif cmd == "/unlinkme":
+                    logging.debug(f"Executing /unlinkme for user {tg_id}")
                     handle_unlinkme(chat_id, tg_id)
                 elif cmd == "/link":
                     parts = text.split()
+                    logging.debug(f"Executing /link for admin {tg_id} with args: {parts[1:]}")
                     handle_admin_link(chat_id, tg_id, parts[1:])
                 elif cmd == "/unlink":
                     parts = text.split()
+                    logging.debug(f"Executing /unlink for admin {tg_id} with args: {parts[1:]}")
                     handle_admin_unlink(chat_id, tg_id, parts[1:])
                 else:
+                    # Unknown command
+                    logging.warning(f"Unknown command from user {tg_id} (@{username}): {cmd}")
+                    activity_logger.info(f"UNKNOWN_COMMAND | User: {first_name} (@{username}) | TG_ID: {tg_id} | Command: {cmd}")
                     send_message(chat_id, "❌ Unknown command. Use /start to see available commands.")
                 
                 return
+            
+            # Handle non-command text messages (log them as potential mistakes)
+            if "text" in message and not message["text"].startswith("/"):
+                non_command_text = message["text"]
+                logging.debug(f"Non-command text from user {tg_id}: {non_command_text[:100]}")
+                activity_logger.info(f"NON_COMMAND_TEXT | User: {first_name} (@{username}) | TG_ID: {tg_id} | Text: {non_command_text[:100]}")
             
             # Handle broadcast messages
             if is_admin and broadcast_mode.get(tg_id) and message:
@@ -2599,7 +2729,27 @@ def handle_update(update):
                 return
     
     except Exception as e:
-        logging.error(f"Update handling failed: {e}", exc_info=True)
+        # Get user info if available
+        user_info = "Unknown"
+        try:
+            if "callback_query" in update:
+                tg_id = update["callback_query"]["from"]["id"]
+                username = update["callback_query"]["from"].get("username", "N/A")
+                user_info = f"TG_ID: {tg_id} (@{username})"
+            elif "message" in update:
+                tg_id = update["message"]["from"]["id"]
+                username = update["message"]["from"].get("username", "N/A")
+                user_info = f"TG_ID: {tg_id} (@{username})"
+        except:
+            pass
+        
+        logging.error(f"Update handling failed for {user_info}: {e}", exc_info=True)
+        logging.error(f"Update data: {json.dumps(update, indent=2)}")
+        
+        # Log to activity logger as well
+        activity_logger = logging.getLogger('user_activity')
+        activity_logger.error(f"ERROR | {user_info} | Exception: {str(e)}")
+
 
 # -------------------------------------------------
 # POLLING LOOP
