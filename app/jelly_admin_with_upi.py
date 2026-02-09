@@ -126,6 +126,14 @@ def delete_message(chat_id, message_id):
     return delete_message_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, message_id)
 
 
+def set_admin_user_action(tg_id, action, user_id, source_message_id=None):
+    admin_user_actions[tg_id] = {
+        "action": action,
+        "user_id": user_id,
+        "source_message_id": source_message_id,
+    }
+
+
 def record_admin_request(request_key, admin_id, message_id):
     if not request_key or not message_id:
         return
@@ -147,10 +155,6 @@ def notify_admins(request_key, text, reply_markup=None, parse_mode=None):
 def notify_admins_notice(text, parse_mode=None):
     for admin_id in admins:
         send_message(admin_id, text, parse_mode=parse_mode)
-
-
-def set_admin_user_action(tg_id, action, user_id):
-    admin_user_actions[tg_id] = {"action": action, "user_id": user_id}
 
 
 def clear_admin_user_action(tg_id):
@@ -1107,16 +1111,11 @@ def handle_users(chat_id, tg_id):
     user_list += f"👤 Regular: {len(regular_users)}\n\n"
     user_list += "💡 Tap a user below to manage subscriptions, roles, and links."
     
-    keyboard = []
-    for uid, u in users.items():
-        keyboard.append([{"text": u.get("username", uid), "callback_data": f"user:{uid}"}])
+    command_lines = [f"/{u.get('username')}_info" for _, u in users.items() if u.get("username")]
+    if command_lines:
+        user_list += "\n\n" + "\n".join(command_lines)
 
-    send_message(
-        chat_id,
-        user_list,
-        parse_mode="Markdown",
-        reply_markup=json.dumps({"inline_keyboard": keyboard}) if keyboard else None
-    )
+    send_message(chat_id, user_list, parse_mode="Markdown")
 
 def handle_broadcast(chat_id, tg_id):
     """Handle /broadcast command (admin only)"""
@@ -1785,6 +1784,7 @@ def handle_update(update):
                 if not user:
                     send_message(chat_id, "❌ User not found.")
                     return
+                delete_message(chat_id, callback["message"]["message_id"])
 
                 keyboard = [
                     [{"text": "ℹ️ Sub Info", "callback_data": f"user_action:{user_id}:subinfo"}],
@@ -1815,19 +1815,24 @@ def handle_update(update):
                     send_message(chat_id, "❌ User not found.")
                     return
 
+                delete_message(chat_id, callback["message"]["message_id"])
+
                 username_value = user.get("username", user_id)
 
                 if action == "subinfo":
+                    delete_message(chat_id, callback["message"]["message_id"])
                     handle_subinfo(chat_id, tg_id, username_value)
                     return
 
                 if action == "subend":
+                    delete_message(chat_id, callback["message"]["message_id"])
                     handle_subend(chat_id, tg_id, username_value)
                     return
 
                 if action == "upgrade":
                     success, result = handle_admin_upgrade(user_id, user)
                     if success:
+                        delete_message(chat_id, callback["message"]["message_id"])
                         send_message(chat_id, f"✅ User `{username_value}` upgraded to {result}.", parse_mode="Markdown")
                         if user.get("telegram_id"):
                             send_message(user["telegram_id"], f"✅ Your role has been upgraded to {result}.")
@@ -1836,17 +1841,17 @@ def handle_update(update):
                     return
 
                 if action == "downgrade":
-                    set_admin_user_action(tg_id, "downgrade", user_id)
+                    set_admin_user_action(tg_id, "downgrade", user_id, callback["message"]["message_id"])
                     send_message(chat_id, "Enter the new role: regular or privileged")
                     return
 
                 if action == "subextend":
-                    set_admin_user_action(tg_id, "subextend", user_id)
+                    set_admin_user_action(tg_id, "subextend", user_id, callback["message"]["message_id"])
                     send_message(chat_id, "Enter number of days to extend the subscription:")
                     return
 
                 if action == "link":
-                    set_admin_user_action(tg_id, "link", user_id)
+                    set_admin_user_action(tg_id, "link", user_id, callback["message"]["message_id"])
                     send_message(chat_id, "Send the Telegram ID to link to this user:")
                     return
 
@@ -1855,6 +1860,7 @@ def handle_update(update):
                     return
 
                 if action == "delete":
+                    delete_message(chat_id, callback["message"]["message_id"])
                     if handle_admin_delete(user_id, user):
                         send_message(chat_id, f"✅ User `{username_value}` deleted.", parse_mode="Markdown")
                     else:
@@ -2552,6 +2558,7 @@ def handle_update(update):
                 action_payload = admin_user_actions.get(tg_id, {})
                 action = action_payload.get("action")
                 target_user_id = action_payload.get("user_id")
+                source_message_id = action_payload.get("source_message_id")
                 target_user = users.get(target_user_id)
                 if not target_user:
                     clear_admin_user_action(tg_id)
@@ -2570,6 +2577,8 @@ def handle_update(update):
                         send_message(chat_id, "❌ Days must be a positive number.")
                         return
                     clear_admin_user_action(tg_id)
+                    if source_message_id:
+                        delete_message(chat_id, source_message_id)
                     handle_subextend(chat_id, tg_id, [target_username, str(days)])
                     return
 
@@ -2579,6 +2588,8 @@ def handle_update(update):
                         send_message(chat_id, "❌ Invalid role. Use: regular or privileged.")
                         return
                     clear_admin_user_action(tg_id)
+                    if source_message_id:
+                        delete_message(chat_id, source_message_id)
                     handle_admin_downgrade(chat_id, tg_id, [target_username, role_value])
                     return
 
@@ -2589,8 +2600,39 @@ def handle_update(update):
                         send_message(chat_id, "❌ Telegram ID must be a number.")
                         return
                     clear_admin_user_action(tg_id)
+                    if source_message_id:
+                        delete_message(chat_id, source_message_id)
                     handle_admin_link(chat_id, tg_id, [target_username, str(telegram_id_value)])
                     return
+
+            if is_admin and "text" in message and message["text"].startswith("/") and message["text"].endswith("_info"):
+                command = message["text"][1:]
+                username_value = command[:-5]
+                if not username_value:
+                    return
+                user_id, user = get_user_by_username(username_value)
+                if not user_id:
+                    send_message(chat_id, f"❌ User '{username_value}' not found.")
+                    return
+                delete_message(chat_id, message.get("message_id"))
+                admin_user_actions.pop(tg_id, None)
+                # Reuse user action menu
+                keyboard = [
+                    [{"text": "ℹ️ Sub Info", "callback_data": f"user_action:{user_id}:subinfo"}],
+                    [{"text": "➕ Extend Sub", "callback_data": f"user_action:{user_id}:subextend"}],
+                    [{"text": "⛔ End Sub", "callback_data": f"user_action:{user_id}:subend"}],
+                    [{"text": "⬆️ Upgrade", "callback_data": f"user_action:{user_id}:upgrade"}],
+                    [{"text": "⬇️ Downgrade", "callback_data": f"user_action:{user_id}:downgrade"}],
+                    [{"text": "🔗 Link TG", "callback_data": f"user_action:{user_id}:link"}],
+                    [{"text": "🔓 Unlink TG", "callback_data": f"user_action:{user_id}:unlink"}],
+                    [{"text": "🗑️ Delete User", "callback_data": f"user_action:{user_id}:delete"}],
+                ]
+                send_message(
+                    chat_id,
+                    f"Manage user: {user.get('username')}\nRole: {user.get('role', ROLE_REGULAR)}",
+                    reply_markup=json.dumps({"inline_keyboard": keyboard})
+                )
+                return
 
             # Handle commands
             if "text" in message and message["text"].startswith("/"):
