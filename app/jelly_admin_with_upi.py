@@ -19,6 +19,8 @@ from bot.jellyfin_api import (
     create_user,
     get_user_id,
     delete_user,
+    get_top_items,
+    get_user_played_runtime,
     reset_password,
     set_user_enabled,
     username_available,
@@ -109,6 +111,63 @@ def check_username_availability(username):
 
 def jellyfin_delete_user(user_id, username):
     return delete_user(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, user_id, username)
+
+
+def get_watch_stats(user_id=None):
+    top_series = get_top_items(
+        JELLYFIN_URL,
+        JELLYFIN_API_KEY,
+        HTTP_SESSION,
+        HTTP_TIMEOUT,
+        "Series",
+        user_id=user_id,
+    )
+    top_movies = get_top_items(
+        JELLYFIN_URL,
+        JELLYFIN_API_KEY,
+        HTTP_SESSION,
+        HTTP_TIMEOUT,
+        "Movie",
+        user_id=user_id,
+    )
+    runtime_users = []
+    if user_id is None:
+        for uid, user in users.items():
+            total_ticks = get_user_played_runtime(
+                JELLYFIN_URL,
+                JELLYFIN_API_KEY,
+                HTTP_SESSION,
+                HTTP_TIMEOUT,
+                uid,
+            )
+            if total_ticks:
+                runtime_users.append((user.get("username", uid), total_ticks))
+
+        runtime_users.sort(key=lambda item: item[1], reverse=True)
+        runtime_users = runtime_users[:10]
+
+    def format_top(title, items):
+        lines = [title]
+        if not items:
+            lines.append("  - No data")
+            return "\n".join(lines)
+        for idx, (name, count) in enumerate(items, start=1):
+            lines.append(f"  {idx}. {name} ({count})")
+        return "\n".join(lines)
+
+    parts = [
+        format_top("Top 10 Series:", top_series),
+        format_top("Top 10 Movies:", top_movies),
+    ]
+
+    if runtime_users:
+        runtime_lines = ["Top 10 Runtime Users (hours):"]
+        for idx, (name, ticks) in enumerate(runtime_users, start=1):
+            hours = round((ticks / 10_000_000) / 3600, 2)
+            runtime_lines.append(f"  {idx}. {name} ({hours}h)")
+        parts.append("\n".join(runtime_lines))
+
+    return "\n\n".join(parts)
 
 
 def send_message(chat_id, text, reply_markup=None, parse_mode=None):
@@ -1170,28 +1229,8 @@ def handle_stats(chat_id, tg_id):
         send_message(chat_id, "❌ Admin access required.")
         return
     
-    total_users = len(users)
-    linked_users = sum(1 for u in users.values() if u.get("telegram_id"))
-    unlinked_users = total_users - linked_users
-    active_subs = sum(1 for uid in users if check_subscription_status(uid)[0])
-    
-    pending_registrations = sum(1 for p in pending.values() if p.get("type", "register") == "register")
-    pending_links = sum(1 for p in pending.values() if p.get("type") == "link")
-    pending_unlinks = sum(1 for p in pending.values() if p.get("type") == "unlink")
-    pending_payments = sum(1 for req in payment_requests.values() if req["status"] == "pending")
-    
-    send_message(chat_id,
-        f"📊 System Statistics\n\n"
-        f"👥 Total Jellyfin Users: {total_users}\n"
-        f"🔗 Linked to Telegram: {linked_users}\n"
-        f"🔓 Unlinked: {unlinked_users}\n"
-        f"✅ Active Subscriptions: {active_subs}\n\n"
-        f"⏳ Pending:\n"
-        f"  • Registrations: {pending_registrations}\n"
-        f"  • Link Requests: {pending_links}\n"
-        f"  • Unlink Requests: {pending_unlinks}\n"
-        f"  • Payments: {pending_payments}"
-    )
+    stats_text = get_watch_stats()
+    send_message(chat_id, f"📊 Overall Watch Stats\n\n{stats_text}")
 
 def handle_payments(chat_id, tg_id):
     """Handle /payments command (admin only) - show pending payment requests"""
@@ -1865,6 +1904,7 @@ def handle_update(update):
                     [{"text": "ℹ️ Sub Info", "callback_data": f"user_action:{user_id}:subinfo"}],
                     [{"text": "➕ Extend Sub", "callback_data": f"user_action:{user_id}:subextend"}],
                     [{"text": "⛔ End Sub", "callback_data": f"user_action:{user_id}:subend"}],
+                    [{"text": "📊 Stats", "callback_data": f"user_action:{user_id}:stats"}],
                     [{"text": "⬆️ Upgrade", "callback_data": f"user_action:{user_id}:upgrade"}],
                     [{"text": "⬇️ Downgrade", "callback_data": f"user_action:{user_id}:downgrade"}],
                     [{"text": "🔗 Link TG", "callback_data": f"user_action:{user_id}:link"}],
@@ -1902,6 +1942,12 @@ def handle_update(update):
                 if action == "subend":
                     delete_message(chat_id, callback["message"]["message_id"])
                     handle_subend(chat_id, tg_id, username_value)
+                    return
+
+                if action == "stats":
+                    delete_message(chat_id, callback["message"]["message_id"])
+                    stats_text = get_watch_stats(user_id)
+                    send_message(chat_id, f"📊 Watch Stats for {username_value}\n\n{stats_text}")
                     return
 
                 if action == "upgrade":
@@ -2702,6 +2748,7 @@ def handle_update(update):
                     [{"text": "ℹ️ Sub Info", "callback_data": f"user_action:{user_id}:subinfo"}],
                     [{"text": "➕ Extend Sub", "callback_data": f"user_action:{user_id}:subextend"}],
                     [{"text": "⛔ End Sub", "callback_data": f"user_action:{user_id}:subend"}],
+                    [{"text": "📊 Stats", "callback_data": f"user_action:{user_id}:stats"}],
                     [{"text": "⬆️ Upgrade", "callback_data": f"user_action:{user_id}:upgrade"}],
                     [{"text": "⬇️ Downgrade", "callback_data": f"user_action:{user_id}:downgrade"}],
                     [{"text": "🔗 Link TG", "callback_data": f"user_action:{user_id}:link"}],

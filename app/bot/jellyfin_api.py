@@ -144,3 +144,60 @@ def delete_user(base_url, api_key, session, timeout, user_id, username):
     except Exception as e:
         logging.error(f"Error deleting Jellyfin user '{username}': {e}")
         return False
+
+
+def get_top_items(base_url, api_key, session, timeout, item_type, limit=10, user_id=None):
+    params = {
+        "Recursive": "true",
+        "IncludeItemTypes": item_type,
+        "SortBy": "PlayCount",
+        "SortOrder": "Descending",
+        "Limit": str(limit),
+        "Fields": "PlayCount",
+    }
+    if user_id:
+        params["UserId"] = user_id
+    try:
+        resp = session.get(
+            f"{base_url}/Items",
+            headers={"X-Emby-Token": api_key},
+            params=params,
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            logging.error(f"Failed to fetch top {item_type} items: {resp.status_code} - {resp.text}")
+            return []
+        items = resp.json().get("Items", [])
+        return [(item.get("Name", "Unknown"), item.get("UserData", {}).get("PlayCount", 0)) for item in items]
+    except Exception as e:
+        logging.error(f"Error fetching top {item_type} items: {e}")
+        return []
+
+
+def get_user_played_runtime(base_url, api_key, session, timeout, user_id, limit=500):
+    params = {
+        "Recursive": "true",
+        "Filters": "IsPlayed",
+        "IncludeItemTypes": "Movie,Episode",
+        "Fields": "RunTimeTicks",
+        "Limit": str(limit),
+        "UserId": user_id,
+    }
+    total_ticks = 0
+    try:
+        resp = session.get(
+            f"{base_url}/Items",
+            headers={"X-Emby-Token": api_key},
+            params=params,
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            logging.error(f"Failed to fetch runtime for user {user_id}: {resp.status_code} - {resp.text}")
+            return 0
+        items = resp.json().get("Items", [])
+        for item in items:
+            total_ticks += item.get("RunTimeTicks", 0) or 0
+        return total_ticks
+    except Exception as e:
+        logging.error(f"Error fetching runtime for user {user_id}: {e}")
+        return 0
