@@ -15,166 +15,167 @@ from datetime import datetime, timedelta
 # CONFIG LOADING + BOOTSTRAP
 # -------------------------------------------------
 
-CONFIG_FILE = "config.json"
+BASE_DIR = Path(__file__).resolve().parent
+CONFIG_DIR = BASE_DIR / "config"
+LOGS_DIR = BASE_DIR / "logs"
 
-def create_sample_config():
-    """Create a sample config file for first-time setup"""
-    sample_config = {
-        "bot_token": "YOUR_TELEGRAM_BOT_TOKEN_HERE",
-        "jellyfin": {
-            "url": "http://your-jellyfin-server:8096",
-            "api_key": "YOUR_JELLYFIN_API_KEY_HERE"
-        },
-        "payment": {
+CONFIG_FILE = CONFIG_DIR / "config.json"
+SECRETS_FILE = CONFIG_DIR / "secrets.json"
+STRINGS_FILE = CONFIG_DIR / "strings.json"
+
+DEFAULT_CONFIG = {
+    "jellyfin": {
+        "url": "http://your-jellyfin-server:8096"
+    },
+    "payment": {
+        "upi_id": "yourname@paytm",
+        "upi_name": "Your Name"
+    },
+    "storage": {
+        "admins": "data/admins.json",
+        "users": "data/users.json",
+        "pending": "data/pending.json",
+        "subscriptions": "data/subscriptions.json",
+        "payment_requests": "data/payment_requests.json",
+        "telegram_mapping": "data/telegram_mapping.json"
+    },
+    "subscription_plans": {
+        "1day": {"duration_days": 1, "price": 5, "name": "1 Day"},
+        "1week": {"duration_days": 7, "price": 10, "name": "1 Week"},
+        "1month": {"duration_days": 30, "price": 35, "name": "1 Month"}
+    }
+}
+
+DEFAULT_SECRETS = {
+    "bot_token": "YOUR_TELEGRAM_BOT_TOKEN_HERE",
+    "jellyfin_api_key": "YOUR_JELLYFIN_API_KEY_HERE"
+}
+
+def read_json_file(filepath):
+    try:
+        with open(filepath, "r") as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Invalid JSON in {filepath}: {e}")
+
+def write_json_file(filepath, data):
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    with open(filepath, "w") as f:
+        json.dump(data, f, indent=2)
+
+def load_strings():
+    if not STRINGS_FILE.exists():
+        raise RuntimeError(f"Missing required strings file: {STRINGS_FILE}")
+    return read_json_file(STRINGS_FILE)
+
+STRINGS = load_strings()
+
+def ensure_config_files():
+    """Create missing config/secrets files for first-time setup"""
+    config_data = DEFAULT_CONFIG
+    secrets_data = DEFAULT_SECRETS
+    created_files = []
+
+    if not CONFIG_FILE.exists():
+        write_json_file(CONFIG_FILE, config_data)
+        created_files.append(CONFIG_FILE)
+
+    if not SECRETS_FILE.exists():
+        write_json_file(SECRETS_FILE, secrets_data)
+        created_files.append(SECRETS_FILE)
+
+    if not created_files:
+        return False
+
+    created_list = "\n".join(f"- {path}" for path in created_files)
+    print(
+        STRINGS["first_run_message"].format(
+            created_list=created_list,
+            config_file=CONFIG_FILE
+        )
+    )
+    return True
+
+def load_config():
+    if ensure_config_files():
+        sys.exit(0)
+
+    config = read_json_file(CONFIG_FILE)
+    secrets_config = read_json_file(SECRETS_FILE)
+
+    # Validate required keys
+    required_config_keys = {
+        "jellyfin": dict,
+        "storage": dict
+    }
+
+    required_secret_keys = {
+        "bot_token": str,
+        "jellyfin_api_key": str
+    }
+
+    for key, expected_type in required_config_keys.items():
+        if key not in config:
+            raise ValueError(f"Missing required config key: {key}")
+        if not isinstance(config[key], expected_type):
+            raise ValueError(f"Config key '{key}' must be of type {expected_type.__name__}")
+
+    for key, expected_type in required_secret_keys.items():
+        if key not in secrets_config:
+            raise ValueError(f"Missing required secrets key: {key}")
+        if not isinstance(secrets_config[key], expected_type):
+            raise ValueError(f"Secrets key '{key}' must be of type {expected_type.__name__}")
+
+    # Validate nested keys
+    if "url" not in config["jellyfin"]:
+        raise ValueError("jellyfin config must contain 'url'")
+
+    if not all(k in config["storage"] for k in ["admins", "users", "pending"]):
+        raise ValueError("storage config must contain 'admins', 'users', and 'pending'")
+
+    # Add payment config if not present
+    if "payment" not in config:
+        config["payment"] = {
             "upi_id": "yourname@paytm",
             "upi_name": "Your Name"
-        },
-        "storage": {
-            "admins": "data/admins.json",
-            "users": "data/users.json",
-            "pending": "data/pending.json",
-            "subscriptions": "data/subscriptions.json",
-            "payment_requests": "data/payment_requests.json"
-        },
-        "subscription_plans": {
+        }
+
+    # Add subscription plans if not present
+    if "subscription_plans" not in config:
+        config["subscription_plans"] = {
             "1day": {"duration_days": 1, "price": 5, "name": "1 Day"},
             "1week": {"duration_days": 7, "price": 10, "name": "1 Week"},
             "1month": {"duration_days": 30, "price": 35, "name": "1 Month"}
         }
-    }
-    
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(sample_config, f, indent=2)
-    
-    print(f"""
-╔══════════════════════════════════════════════════════════════════════════╗
-║                        FIRST TIME SETUP DETECTED                         ║
-╚══════════════════════════════════════════════════════════════════════════╝
 
-A sample configuration file has been created: {CONFIG_FILE}
+    # Add storage paths if not present
+    if "subscriptions" not in config["storage"]:
+        config["storage"]["subscriptions"] = "data/subscriptions.json"
+    if "payment_requests" not in config["storage"]:
+        config["storage"]["payment_requests"] = "data/payment_requests.json"
+    if "telegram_mapping" not in config["storage"]:
+        config["storage"]["telegram_mapping"] = "data/telegram_mapping.json"
 
-📝 NEXT STEPS:
+    return config, secrets_config
 
-1. Get your Telegram Bot Token:
-   • Talk to @BotFather on Telegram
-   • Create a new bot with /newbot
-   • Copy the token and paste it in config.json
-
-2. Get your Jellyfin API Key:
-   • Log in to your Jellyfin admin dashboard
-   • Go to Dashboard → API Keys
-   • Create a new API key
-   • Copy it and paste it in config.json
-
-3. Configure UPI Payment:
-   • Add your UPI ID (e.g., yourname@paytm)
-   • Add your name for payment reference
-
-4. Update the config file:
-   • Edit {CONFIG_FILE}
-   • Replace all placeholder values with your actual values
-   • Make sure the Jellyfin URL is correct
-
-5. Create the data directory:
-   • mkdir -p data
-
-6. Run the bot again (second run):
-   • python jelly_admin_with_upi.py
-   • This will load all users from Jellyfin server
-   • All users will be marked as privileged initially
-
-7. After second run, configure admin(s):
-   • Open data/users.json
-   • Find user(s) with "is_admin": true
-   • Add "telegram_id" field with their Telegram ID
-   • You can make additional users admin by setting "is_admin": true and adding telegram_id
-   • Get Telegram IDs from @userinfobot
-
-8. Third run will sync admins automatically:
-   • python jelly_admin_with_upi.py
-   • admins.json is auto-generated from users.json (don't edit it directly)
-   • Only edit users.json to manage admins
-
-╔══════════════════════════════════════════════════════════════════════════╗
-║  The bot will start once you've configured {CONFIG_FILE}  ║
-╚══════════════════════════════════════════════════════════════════════════╝
-""")
-
-def load_config():
-    if not Path(CONFIG_FILE).exists():
-        create_sample_config()
-        sys.exit(0)
-    
-    try:
-        with open(CONFIG_FILE, "r") as f:
-            config = json.load(f)
-        
-        # Validate required keys
-        required_keys = {
-            "bot_token": str,
-            "jellyfin": dict,
-            "storage": dict
-        }
-        
-        for key, expected_type in required_keys.items():
-            if key not in config:
-                raise ValueError(f"Missing required config key: {key}")
-            if not isinstance(config[key], expected_type):
-                raise ValueError(f"Config key '{key}' must be of type {expected_type.__name__}")
-        
-        # Validate nested keys
-        if "url" not in config["jellyfin"] or "api_key" not in config["jellyfin"]:
-            raise ValueError("jellyfin config must contain 'url' and 'api_key'")
-        
-        if not all(k in config["storage"] for k in ["admins", "users", "pending"]):
-            raise ValueError("storage config must contain 'admins', 'users', and 'pending'")
-        
-        # Add payment config if not present
-        if "payment" not in config:
-            config["payment"] = {
-                "upi_id": "yourname@paytm",
-                "upi_name": "Your Name"
-            }
-        
-        # Add subscription plans if not present
-        if "subscription_plans" not in config:
-            config["subscription_plans"] = {
-                "1day": {"duration_days": 1, "price": 5, "name": "1 Day"},
-                "1week": {"duration_days": 7, "price": 10, "name": "1 Week"},
-                "1month": {"duration_days": 30, "price": 35, "name": "1 Month"}
-            }
-        
-        # Add storage paths if not present
-        if "subscriptions" not in config["storage"]:
-            config["storage"]["subscriptions"] = "data/subscriptions.json"
-        if "payment_requests" not in config["storage"]:
-            config["storage"]["payment_requests"] = "data/payment_requests.json"
-        if "telegram_mapping" not in config["storage"]:
-            config["storage"]["telegram_mapping"] = "data/telegram_mapping.json"
-        
-        return config
-        
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Invalid JSON in config.json: {e}")
-
-config = load_config()
+config, secrets_config = load_config()
 
 # Validate config is not using placeholder values
-if config["bot_token"] == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
-    print("❌ Error: Please configure your bot_token in config.json")
+if secrets_config["bot_token"] == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
+    print(f"❌ Error: Please configure your bot_token in {SECRETS_FILE}")
     sys.exit(1)
 
-if config["jellyfin"]["api_key"] == "YOUR_JELLYFIN_API_KEY_HERE":
-    print("❌ Error: Please configure your Jellyfin api_key in config.json")
+if secrets_config["jellyfin_api_key"] == "YOUR_JELLYFIN_API_KEY_HERE":
+    print(f"❌ Error: Please configure your Jellyfin api_key in {SECRETS_FILE}")
     sys.exit(1)
 
 # -------------------------------------------------
 # GLOBAL VARIABLES
 # -------------------------------------------------
 
-TELEGRAM_API = f"https://api.telegram.org/bot{config['bot_token']}"
+TELEGRAM_API = f"https://api.telegram.org/bot{secrets_config['bot_token']}"
 JELLYFIN_URL = config["jellyfin"]["url"]
-JELLYFIN_API_KEY = config["jellyfin"]["api_key"]
+JELLYFIN_API_KEY = secrets_config["jellyfin_api_key"]
 UPI_ID = config["payment"]["upi_id"]
 UPI_NAME = config["payment"]["upi_name"]
 
@@ -226,7 +227,7 @@ def bootstrap_users_from_server():
         jelly_users = fetch_jellyfin_users()
     except Exception as e:
         print(f"❌ Failed to connect to Jellyfin server: {e}")
-        print("⚠️ Make sure your Jellyfin URL and API key are correct in config.json")
+        print(f"⚠️ Make sure your Jellyfin URL is correct in {CONFIG_FILE} and API key is correct in {SECRETS_FILE}")
         sys.exit(1)
 
     users = {}
@@ -290,7 +291,7 @@ def setup_logging():
     """Setup comprehensive logging system with separate info and debug logs"""
     
     # Create logs directory if it doesn't exist
-    Path("logs").mkdir(exist_ok=True)
+    LOGS_DIR.mkdir(exist_ok=True)
     
     # Create formatters
     detailed_formatter = logging.Formatter(
@@ -317,19 +318,19 @@ def setup_logging():
     logger.addHandler(console_handler)
     
     # Handler 2: General log file (INFO and above)
-    info_handler = logging.FileHandler("logs/bot.log", encoding='utf-8')
+    info_handler = logging.FileHandler(LOGS_DIR / "bot.log", encoding='utf-8')
     info_handler.setLevel(logging.INFO)
     info_handler.setFormatter(simple_formatter)
     logger.addHandler(info_handler)
     
     # Handler 3: Debug log file (ALL messages including DEBUG)
-    debug_handler = logging.FileHandler("logs/debug.log", encoding='utf-8')
+    debug_handler = logging.FileHandler(LOGS_DIR / "debug.log", encoding='utf-8')
     debug_handler.setLevel(logging.DEBUG)
     debug_handler.setFormatter(detailed_formatter)
     logger.addHandler(debug_handler)
     
     # Handler 4: Error log file (ERROR and CRITICAL only)
-    error_handler = logging.FileHandler("logs/error.log", encoding='utf-8')
+    error_handler = logging.FileHandler(LOGS_DIR / "error.log", encoding='utf-8')
     error_handler.setLevel(logging.ERROR)
     error_handler.setFormatter(detailed_formatter)
     logger.addHandler(error_handler)
@@ -339,7 +340,7 @@ def setup_logging():
     activity_logger.setLevel(logging.DEBUG)
     activity_logger.propagate = False  # Don't propagate to root logger
     
-    activity_handler = logging.FileHandler("logs/user_activity.log", encoding='utf-8')
+    activity_handler = logging.FileHandler(LOGS_DIR / "user_activity.log", encoding='utf-8')
     activity_handler.setLevel(logging.DEBUG)
     activity_formatter = logging.Formatter(
         '%(asctime)s | %(message)s',
@@ -352,10 +353,10 @@ def setup_logging():
     logging.info("LOGGING SYSTEM INITIALIZED")
     logging.info("=" * 80)
     logging.info(f"Console Output: INFO level and above")
-    logging.info(f"General Log: logs/bot.log (INFO+)")
-    logging.info(f"Debug Log: logs/debug.log (ALL messages)")
-    logging.info(f"Error Log: logs/error.log (ERROR+)")
-    logging.info(f"Activity Log: logs/user_activity.log (All user interactions)")
+    logging.info(f"General Log: {LOGS_DIR / 'bot.log'} (INFO+)")
+    logging.info(f"Debug Log: {LOGS_DIR / 'debug.log'} (ALL messages)")
+    logging.info(f"Error Log: {LOGS_DIR / 'error.log'} (ERROR+)")
+    logging.info(f"Activity Log: {LOGS_DIR / 'user_activity.log'} (All user interactions)")
     logging.info("=" * 80)
 
 def save_json(filepath, data):
