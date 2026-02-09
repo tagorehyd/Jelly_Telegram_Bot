@@ -9,7 +9,7 @@ A Telegram bot that manages Jellyfin users, subscriptions, and admin workflows u
 
 ## Quick Start
 1. Read **DOCUMENTATION.md** for setup guidance.
-2. Run the bot once to generate `config/config.json` and `config/secrets.json`.
+2. Run the bot once to generate `app/config/config.json` and `app/config/secrets.json`.
 3. Update those config files with your values.
 4. Run the bot again to start service.
 
