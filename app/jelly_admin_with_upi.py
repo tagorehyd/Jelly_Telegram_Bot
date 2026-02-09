@@ -28,6 +28,7 @@ from bot.telegram_api import (
     send_photo as send_photo_api,
     send_video as send_video_api,
     delete_message as delete_message_api,
+    edit_message_reply_markup as edit_message_reply_markup_api,
 )
 
 # -------------------------------------------------
@@ -126,6 +127,9 @@ def delete_message(chat_id, message_id):
     return delete_message_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, message_id)
 
 
+def edit_message_reply_markup(chat_id, message_id, reply_markup):
+    return edit_message_reply_markup_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, message_id, reply_markup)
+
 def set_admin_user_action(tg_id, action, user_id, source_message_id=None):
     admin_user_actions[tg_id] = {
         "action": action,
@@ -155,6 +159,22 @@ def notify_admins(request_key, text, reply_markup=None, parse_mode=None):
 def notify_admins_notice(text, parse_mode=None):
     for admin_id in admins:
         send_message(admin_id, text, parse_mode=parse_mode)
+
+
+def notify_admins_notice_except(exclude_id, text, parse_mode=None):
+    for admin_id in admins:
+        if str(admin_id) == str(exclude_id):
+            continue
+        send_message(admin_id, text, parse_mode=parse_mode)
+
+
+def update_admin_request_buttons(request_key, text):
+    messages = admin_request_messages.get(request_key, {})
+    if not messages:
+        return
+    markup = json.dumps({"inline_keyboard": [[{"text": text, "callback_data": "noop"}]]})
+    for admin_id, message_id in messages.items():
+        edit_message_reply_markup(admin_id, message_id, markup)
 
 
 def clear_admin_user_action(tg_id):
@@ -1308,6 +1328,15 @@ def handle_subextend(chat_id, tg_id, args):
         f"⏰ Old expiry: {old_expiry}\n"
         f"⏰ New expiry: {new_expiry_str}"
     )
+    approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
+    notify_admins_notice_except(
+        tg_id,
+        f"➕ Subscription extended by {approver_label}\n\n"
+        f"User: `{username}`\n"
+        f"Days: {days}\n"
+        f"New expiry: {new_expiry_str}",
+        parse_mode="Markdown"
+    )
     
     # Notify user
     telegram_id = user.get("telegram_id")
@@ -1354,6 +1383,13 @@ def handle_subend(chat_id, tg_id, username):
         f"✅ Subscription ended!\n\n"
         f"👤 User: {username}\n"
         f"⏰ Ended at: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    )
+    approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
+    notify_admins_notice_except(
+        tg_id,
+        f"⛔ Subscription ended by {approver_label}\n\n"
+        f"User: `{username}`",
+        parse_mode="Markdown"
     )
     
     # Notify user
@@ -1567,6 +1603,14 @@ def handle_admin_link(chat_id, tg_id, args):
     save_json(USERS_FILE, users)
     
     send_message(chat_id, f"✅ Successfully linked!\n\n👤 User: {username_to_link}\n🆔 Telegram ID: {telegram_id_to_link}", parse_mode="Markdown")
+    approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
+    notify_admins_notice_except(
+        tg_id,
+        f"🔗 Link updated by {approver_label}\n\n"
+        f"User: `{username_to_link}`\n"
+        f"Telegram ID: {telegram_id_to_link}",
+        parse_mode="Markdown"
+    )
     
     # Notify the user
     try:
@@ -1613,6 +1657,14 @@ def handle_admin_unlink(chat_id, tg_id, args):
     save_json(USERS_FILE, users)
     
     send_message(chat_id, f"✅ Successfully unlinked!\n\n👤 User: {username_to_unlink}\n🆔 Previous Telegram ID: {old_telegram_id}", parse_mode="Markdown")
+    approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
+    notify_admins_notice_except(
+        tg_id,
+        f"🔓 Unlink updated by {approver_label}\n\n"
+        f"User: `{username_to_unlink}`\n"
+        f"Telegram ID: {old_telegram_id}",
+        parse_mode="Markdown"
+    )
     
     # Notify the user
     try:
@@ -1657,6 +1709,14 @@ def handle_admin_downgrade(chat_id, tg_id, args):
     save_json(USERS_FILE, users)
 
     send_message(chat_id, f"✅ User `{username}` downgraded to {target_role}.", parse_mode="Markdown")
+    approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
+    notify_admins_notice_except(
+        tg_id,
+        f"⬇️ Role downgraded by {approver_label}\n\n"
+        f"User: `{username}`\n"
+        f"Role: {target_role}",
+        parse_mode="Markdown"
+    )
 
     telegram_id = user.get("telegram_id")
     if telegram_id:
@@ -1667,7 +1727,7 @@ def handle_admin_downgrade(chat_id, tg_id, args):
         )
 
 
-def handle_admin_upgrade(user_id, user):
+def handle_admin_upgrade(user_id, user, tg_id):
     current_role = user.get("role", ROLE_REGULAR)
     if current_role == ROLE_ADMIN:
         return False, "User is already an admin."
@@ -1676,10 +1736,18 @@ def handle_admin_upgrade(user_id, user):
     users[user_id]["role"] = target_role
     users[user_id]["is_admin"] = target_role == ROLE_ADMIN
     save_json(USERS_FILE, users)
+    approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
+    notify_admins_notice_except(
+        tg_id,
+        f"⬆️ Role upgraded by {approver_label}\n\n"
+        f"User: `{user.get('username')}`\n"
+        f"Role: {target_role}",
+        parse_mode="Markdown"
+    )
     return True, target_role
 
 
-def handle_admin_delete(user_id, user):
+def handle_admin_delete(user_id, user, tg_id):
     username = user.get("username", user_id)
     if not jellyfin_delete_user(user_id, username):
         return False
@@ -1697,6 +1765,13 @@ def handle_admin_delete(user_id, user):
     save_json(SUBSCRIPTIONS_FILE, subscriptions)
     save_json(ADMINS_FILE, admins)
     save_json(TELEGRAM_MAPPING_FILE, telegram_to_userid)
+    approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
+    notify_admins_notice_except(
+        tg_id,
+        f"🗑️ User deleted by {approver_label}\n\n"
+        f"User: `{username}`",
+        parse_mode="Markdown"
+    )
     return True
 
 
@@ -1830,7 +1905,7 @@ def handle_update(update):
                     return
 
                 if action == "upgrade":
-                    success, result = handle_admin_upgrade(user_id, user)
+                    success, result = handle_admin_upgrade(user_id, user, tg_id)
                     if success:
                         delete_message(chat_id, callback["message"]["message_id"])
                         send_message(chat_id, f"✅ User `{username_value}` upgraded to {result}.", parse_mode="Markdown")
@@ -1861,7 +1936,7 @@ def handle_update(update):
 
                 if action == "delete":
                     delete_message(chat_id, callback["message"]["message_id"])
-                    if handle_admin_delete(user_id, user):
+                    if handle_admin_delete(user_id, user, tg_id):
                         send_message(chat_id, f"✅ User `{username_value}` deleted.", parse_mode="Markdown")
                     else:
                         send_message(chat_id, f"❌ Failed to delete `{username_value}`.", parse_mode="Markdown")
@@ -1939,8 +2014,8 @@ def handle_update(update):
                         pending.pop(uid, None)
                         safe_file_save(PENDING_FILE, pending, "pending requests")
                         
-                        revoke_admin_request(request_key)
                         approver_label = f"{first_name} (@{username})" if username != "N/A" else first_name
+                        update_admin_request_buttons(request_key, "✅ Approved")
 
                         # Notify user
                         try:
@@ -1960,7 +2035,8 @@ def handle_update(update):
                         send_message(chat_id, f"✅ User `{p['username']}` approved and created successfully.\n\n"
                                     f"Jellyfin ID: {jellyfin_id}\n"
                                     f"Account is disabled until subscription.", parse_mode="Markdown")
-                        notify_admins_notice(
+                        notify_admins_notice_except(
+                            tg_id,
                             f"✅ Registration approved by {approver_label}\n\n"
                             f"Username: `{p['username']}`\n"
                             f"Telegram ID: {uid}",
@@ -1972,7 +2048,7 @@ def handle_update(update):
                     request_key = f"register:{uid}"
                     p = pending.pop(uid, None)
                     if p:
-                        revoke_admin_request(request_key)
+                        update_admin_request_buttons(request_key, "❌ Rejected")
                         save_json(PENDING_FILE, pending)
                         send_message(uid, "❌ Your registration request was declined.\n\nPlease contact an administrator if you believe this was a mistake.")
                         send_message(chat_id, f"✅ Registration request for `{p.get('username', 'user')}` rejected.", parse_mode="Markdown")
@@ -1990,11 +2066,12 @@ def handle_update(update):
                     
                     password = generate_password()
                     if jellyfin_reset_password(user["username"], password):
-                        revoke_admin_request(request_key)
                         approver_label = f"{first_name} (@{username})" if username != "N/A" else first_name
+                        update_admin_request_buttons(request_key, "✅ Approved")
                         send_message(uid, f"✅ Password reset approved!\n\n🔐 Your new Jellyfin password:\n\n`{password}`\n\nPlease save this securely.", parse_mode="Markdown")
                         send_message(chat_id, f"✅ Password reset for `{user['username']}` completed.", parse_mode="Markdown")
-                        notify_admins_notice(
+                        notify_admins_notice_except(
+                            tg_id,
                             f"✅ Password reset approved by {approver_label}\n\n"
                             f"Username: `{user['username']}`",
                             parse_mode="Markdown"
@@ -2009,7 +2086,7 @@ def handle_update(update):
                     request_key = f"reset:{uid}"
                     user_id, user = get_user_by_telegram_id(uid)
                     if user:
-                        revoke_admin_request(request_key)
+                        update_admin_request_buttons(request_key, "❌ Rejected")
                         send_message(uid, "❌ Your password reset request was declined.\n\nPlease contact an administrator if you need assistance.")
                         send_message(chat_id, f"✅ Password reset request for `{user['username']}` rejected.", parse_mode="Markdown")
                         logging.info(f"Password reset for user {user_id} (telegram {uid}) rejected by admin {tg_id}")
@@ -2049,8 +2126,8 @@ def handle_update(update):
                     payment_requests[request_id]["approved_by"] = str(tg_id)
                     payment_requests[request_id]["approved_at"] = int(time.time())
                     save_json(PAYMENT_REQUESTS_FILE, payment_requests)
-                    revoke_admin_request(request_key)
                     approver_label = f"{first_name} (@{username})" if username != "N/A" else first_name
+                    update_admin_request_buttons(request_key, "✅ Approved")
                     
                     # Notify user (send to telegram_id)
                     send_message(
@@ -2073,7 +2150,8 @@ def handle_update(update):
                         f"Expires: {expiry_date}",
                         parse_mode="Markdown"
                     )
-                    notify_admins_notice(
+                    notify_admins_notice_except(
+                        tg_id,
                         f"✅ Payment approved by {approver_label}\n\n"
                         f"Username: `{users[user_id]['username']}`\n"
                         f"Plan: {plan['name']}\n"
@@ -2101,7 +2179,7 @@ def handle_update(update):
                     payment_requests[request_id]["rejected_by"] = str(tg_id)
                     payment_requests[request_id]["rejected_at"] = int(time.time())
                     save_json(PAYMENT_REQUESTS_FILE, payment_requests)
-                    revoke_admin_request(request_key)
+                    update_admin_request_buttons(request_key, "❌ Rejected")
                     
                     # Notify user (send to telegram_id)
                     if user_id in users:
@@ -2175,8 +2253,8 @@ def handle_update(update):
                     pending.pop(uid, None)
                     safe_file_save(PENDING_FILE, pending, "pending requests")
                     
-                    revoke_admin_request(request_key)
                     approver_label = f"{first_name} (@{username})" if username != "N/A" else first_name
+                    update_admin_request_buttons(request_key, "✅ Approved")
 
                     # Notify user
                     try:
@@ -2198,7 +2276,8 @@ def handle_update(update):
                         f"👤 Jellyfin User: {users[jellyfin_user_id]['username']}",
                         parse_mode="Markdown"
                     )
-                    notify_admins_notice(
+                    notify_admins_notice_except(
+                        tg_id,
                         f"✅ Link approved by {approver_label}\n\n"
                         f"Telegram ID: {uid}\n"
                         f"Jellyfin User: `{users[jellyfin_user_id]['username']}`",
@@ -2212,7 +2291,7 @@ def handle_update(update):
                     # Reject link request
                     p = pending.pop(uid, None)
                     if p:
-                        revoke_admin_request(request_key)
+                        update_admin_request_buttons(request_key, "❌ Rejected")
                         save_json(PENDING_FILE, pending)
                         send_message(uid, "❌ Your link request was declined.\n\nPlease contact an administrator if you believe this was a mistake.")
                         send_message(chat_id, f"✅ Link request rejected for Telegram ID {uid}.")
@@ -2240,8 +2319,8 @@ def handle_update(update):
                     # Remove from pending
                     pending.pop(uid, None)
                     save_json(PENDING_FILE, pending)
-                    revoke_admin_request(request_key)
                     approver_label = f"{first_name} (@{username})" if username != "N/A" else first_name
+                    update_admin_request_buttons(request_key, "✅ Approved")
                     
                     # Notify user
                     send_message(
@@ -2260,7 +2339,8 @@ def handle_update(update):
                         f"🆔 Telegram ID: {uid}",
                         parse_mode="Markdown"
                     )
-                    notify_admins_notice(
+                    notify_admins_notice_except(
+                        tg_id,
                         f"✅ Unlink approved by {approver_label}\n\n"
                         f"User: `{username}`\n"
                         f"Telegram ID: {uid}",
@@ -2276,7 +2356,7 @@ def handle_update(update):
                         username = pending[uid].get("username", "User")
                         pending.pop(uid, None)
                         save_json(PENDING_FILE, pending)
-                        revoke_admin_request(request_key)
+                        update_admin_request_buttons(request_key, "❌ Rejected")
                         send_message(uid, "❌ Your unlink request was declined.\n\nPlease contact an administrator if you need assistance.")
                         send_message(chat_id, f"✅ Unlink request rejected for user {username}.")
                         logging.info(f"Unlink request rejected by admin {tg_id} for user {username}")
@@ -2302,14 +2382,15 @@ def handle_update(update):
 
                     pending.pop(uid, None)
                     save_json(PENDING_FILE, pending)
-                    revoke_admin_request(request_key)
+                    update_admin_request_buttons(request_key, "✅ Approved")
 
                     approver_label = f"{first_name} (@{username})" if username != "N/A" else first_name
                     send_message(
                         int(uid),
                         f"✅ Your role upgrade has been approved!\n\nNew role: {target_role}"
                     )
-                    notify_admins_notice(
+                    notify_admins_notice_except(
+                        tg_id,
                         f"✅ Role upgrade approved by {approver_label}\n\n"
                         f"User: `{user.get('username')}`\n"
                         f"Role: {target_role}",
@@ -2321,7 +2402,7 @@ def handle_update(update):
                     if uid in pending and pending[uid].get("type") == "role_upgrade":
                         pending.pop(uid, None)
                         save_json(PENDING_FILE, pending)
-                        revoke_admin_request(request_key)
+                        update_admin_request_buttons(request_key, "❌ Rejected")
                         send_message(uid, "❌ Your role upgrade request was declined.\n\nPlease contact an administrator if you need assistance.")
                         send_message(chat_id, "✅ Role upgrade request rejected.")
                     else:

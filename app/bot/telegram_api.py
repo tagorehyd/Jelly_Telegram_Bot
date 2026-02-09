@@ -81,3 +81,23 @@ def delete_message(session, timeout, api_base, chat_id, message_id):
     except Exception as e:
         logging.error(f"Failed to delete message {message_id} for {chat_id}: {e}")
         return False
+
+
+def edit_message_reply_markup(session, timeout, api_base, chat_id, message_id, reply_markup):
+    payload = {"chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup}
+    try:
+        response = session.post(f"{api_base}/editMessageReplyMarkup", json=payload, timeout=timeout)
+        if response.status_code != 200:
+            logging.error(
+                f"Failed to edit reply markup for {message_id} in {chat_id}: "
+                f"{response.status_code} - {response.text}"
+            )
+            return False
+        data = response.json()
+        if not data.get("ok"):
+            logging.error(f"Telegram API error editing reply markup for {message_id}: {data}")
+            return False
+        return True
+    except Exception as e:
+        logging.error(f"Failed to edit reply markup for {message_id} in {chat_id}: {e}")
+        return False
