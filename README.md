@@ -15,3 +15,14 @@ A Telegram bot that manages Jellyfin users, subscriptions, and admin workflows u
 
 ## Documentation
 See **DOCUMENTATION.md** for full setup, commands, data files, and logging details.
+
+## Docker Compose
+1. Build and start:
+   ```bash
+   docker compose up --build
+   ```
+2. Edit `config/config.json` and `config/secrets.json` on the host.
+3. Restart the container:
+   ```bash
+   docker compose restart
+   ```

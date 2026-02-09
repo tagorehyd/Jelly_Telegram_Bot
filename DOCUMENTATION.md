@@ -15,6 +15,17 @@ This bot connects Telegram users to Jellyfin accounts, handling registrations, a
    ```
 5. Run the bot again. On the second run, it will import Jellyfin users and mark admins based on Jellyfin permissions.
 
+## Docker Compose
+1. Build and start the container:
+   ```bash
+   docker compose up --build
+   ```
+2. Edit the generated `config/config.json` and `config/secrets.json` on the host.
+3. Restart the container:
+   ```bash
+   docker compose restart
+   ```
+
 ## Configuration Files
 - `config/config.json` – non-secret settings (Jellyfin URL, payment, storage paths, subscription plans).
 - `config/secrets.json` – secrets (Telegram bot token, Jellyfin API key).
