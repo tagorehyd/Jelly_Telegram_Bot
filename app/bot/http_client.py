@@ -12,7 +12,7 @@ def create_session():
         total=3,
         backoff_factor=0.5,
         status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods={"GET", "POST"},
+        allowed_methods={"GET", "POST", "DELETE"},
         raise_on_status=False
     )
     adapter = HTTPAdapter(max_retries=retry)

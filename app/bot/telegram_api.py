@@ -41,7 +41,7 @@ def send_photo(session, timeout, api_base, chat_id, photo, caption=None, reply_m
         return data.get("result", {}).get("message_id")
     except Exception as e:
         logging.error(f"Failed to send photo to {chat_id}: {e}")
-        return False
+        return None
 
 
 def send_video(session, timeout, api_base, chat_id, video, caption=None, reply_markup=None):
@@ -63,7 +63,7 @@ def send_video(session, timeout, api_base, chat_id, video, caption=None, reply_m
         return data.get("result", {}).get("message_id")
     except Exception as e:
         logging.error(f"Failed to send video to {chat_id}: {e}")
-        return False
+        return None
 
 
 def delete_message(session, timeout, api_base, chat_id, message_id):

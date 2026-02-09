@@ -127,3 +127,20 @@ def username_available(base_url, api_key, session, timeout, username):
     except Exception as e:
         logging.error(f"Error checking username availability for '{username}': {e}")
         return False
+
+
+def delete_user(base_url, api_key, session, timeout, user_id, username):
+    try:
+        resp = session.delete(
+            f"{base_url}/Users/{user_id}",
+            headers={"X-Emby-Token": api_key},
+            timeout=timeout
+        )
+        if resp.status_code in (200, 204):
+            logging.info(f"Jellyfin user '{username}' deleted successfully")
+            return True
+        logging.error(f"Failed to delete Jellyfin user '{username}': {resp.status_code} - {resp.text}")
+        return False
+    except Exception as e:
+        logging.error(f"Error deleting Jellyfin user '{username}': {e}")
+        return False

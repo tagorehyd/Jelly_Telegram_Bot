@@ -18,6 +18,7 @@ from bot.jellyfin_api import (
     fetch_users,
     create_user,
     get_user_id,
+    delete_user,
     reset_password,
     set_user_enabled,
     username_available,
@@ -75,6 +76,7 @@ target_broadcast = {}
 awaiting_username = {}  # Track users who need to provide username: {tg_id: {name, requested_at}}
 username_to_uid = {}  # Fast username lookup: {username.lower(): jellyfin_user_id}
 admin_request_messages = {}
+admin_user_actions = {}
 
 # -------------------------------------------------
 # API WRAPPERS
@@ -102,6 +104,10 @@ def jellyfin_reset_password(username, new_password):
 
 def check_username_availability(username):
     return username_available(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, username)
+
+
+def jellyfin_delete_user(user_id, username):
+    return delete_user(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, user_id, username)
 
 
 def send_message(chat_id, text, reply_markup=None, parse_mode=None):
@@ -141,6 +147,14 @@ def notify_admins(request_key, text, reply_markup=None, parse_mode=None):
 def notify_admins_notice(text, parse_mode=None):
     for admin_id in admins:
         send_message(admin_id, text, parse_mode=parse_mode)
+
+
+def set_admin_user_action(tg_id, action, user_id):
+    admin_user_actions[tg_id] = {"action": action, "user_id": user_id}
+
+
+def clear_admin_user_action(tg_id):
+    admin_user_actions.pop(tg_id, None)
 
 # -------------------------------------------------
 # JELLYFIN USER BOOTSTRAP (SECOND RUN)
@@ -728,15 +742,8 @@ def handle_start(chat_id, tg_id, first_name):
                 "/users - List all users\n"
                 "/stats - View system statistics\n"
                 "/broadcast - Send message to all users\n"
-                "/message <username> - Send message to specific user\n\n"
-                "👥 User Management:\n"
-                "/link <username> <telegram_id> - Link user to Telegram ID\n"
-                "/unlink <username> - Unlink user from Telegram ID\n\n"
+                "/message <username> - Send message to specific user\n"
                 "/downgrade <username> <role> - Downgrade user role\n\n"
-                "💳 Subscription Management:\n"
-                "/subinfo <username> - View subscription details\n"
-                "/subextend <username> <days> - Extend subscription\n"
-                "/subend <username> - End subscription\n\n"
                 "🔐 Personal:\n"
                 "/resetpw - Reset your password"
             )
@@ -748,7 +755,8 @@ def handle_start(chat_id, tg_id, first_name):
                 f"🎯 Status: Privileged User (No subscription required)\n\n"
                 "Commands:\n"
                 "/resetpw - Reset password\n"
-                "/unlinkme - Unlink Telegram account"
+                "/unlinkme - Unlink Telegram account\n"
+                "/upgrade - Request role upgrade"
             )
             return
         else:
@@ -1067,39 +1075,48 @@ def handle_users(chat_id, tg_id):
     if admin_users:
         user_list += "**👑 Admins:**\n"
         for uid, u in admin_users:
-            user_list += f"👑 `{u['username']}`\n"
+            tg_label = f" (TG: {u['telegram_id']})" if u.get("telegram_id") else ""
+            user_list += f"👑 `{u['username']}`{tg_label}\n"
         user_list += "\n"
     
     # Display privileged users
     if privileged_users:
         user_list += "**⭐ Privileged Users:**\n"
         for uid, u in privileged_users:
-            user_list += f"⭐ `{u['username']}`\n"
+            tg_label = f" (TG: {u['telegram_id']})" if u.get("telegram_id") else ""
+            user_list += f"⭐ `{u['username']}`{tg_label}\n"
         user_list += "\n"
     
     # Display regular users with subscription status
     if regular_users:
         user_list += "**👤 Regular Users:**\n"
         for uid, u in regular_users:
+            tg_label = f" (TG: {u['telegram_id']})" if u.get("telegram_id") else ""
             active, expires_at = check_subscription_status(uid)
             if active and expires_at:
                 expiry_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d")
-                user_list += f"👤 `{u['username']}` - ✅ Active (expires {expiry_date})\n"
+                user_list += f"👤 `{u['username']}`{tg_label} - ✅ Active (expires {expiry_date})\n"
             elif active and not expires_at:
-                user_list += f"👤 `{u['username']}` - ✅ Active (permanent)\n"
+                user_list += f"👤 `{u['username']}`{tg_label} - ✅ Active (permanent)\n"
             else:
-                user_list += f"👤 `{u['username']}` - ❌ Expired\n"
+                user_list += f"👤 `{u['username']}`{tg_label} - ❌ Expired\n"
     
     user_list += f"\n📊 Total: {len(users)} users\n"
     user_list += f"👑 Admins: {len(admin_users)}\n"
     user_list += f"⭐ Privileged: {len(privileged_users)}\n"
     user_list += f"👤 Regular: {len(regular_users)}\n\n"
-    user_list += "💡 To manage a user's subscription, use:\n"
-    user_list += "`/subinfo <username>` - View subscription details\n"
-    user_list += "`/subextend <username> <days>` - Extend subscription\n"
-    user_list += "`/subend <username>` - End subscription"
+    user_list += "💡 Tap a user below to manage subscriptions, roles, and links."
     
-    send_message(chat_id, user_list, parse_mode="Markdown")
+    keyboard = []
+    for uid, u in users.items():
+        keyboard.append([{"text": u.get("username", uid), "callback_data": f"user:{uid}"}])
+
+    send_message(
+        chat_id,
+        user_list,
+        parse_mode="Markdown",
+        reply_markup=json.dumps({"inline_keyboard": keyboard}) if keyboard else None
+    )
 
 def handle_broadcast(chat_id, tg_id):
     """Handle /broadcast command (admin only)"""
@@ -1651,6 +1668,39 @@ def handle_admin_downgrade(chat_id, tg_id, args):
         )
 
 
+def handle_admin_upgrade(user_id, user):
+    current_role = user.get("role", ROLE_REGULAR)
+    if current_role == ROLE_ADMIN:
+        return False, "User is already an admin."
+
+    target_role = ROLE_PRIVILEGED if current_role == ROLE_REGULAR else ROLE_ADMIN
+    users[user_id]["role"] = target_role
+    users[user_id]["is_admin"] = target_role == ROLE_ADMIN
+    save_json(USERS_FILE, users)
+    return True, target_role
+
+
+def handle_admin_delete(user_id, user):
+    username = user.get("username", user_id)
+    if not jellyfin_delete_user(user_id, username):
+        return False
+
+    users.pop(user_id, None)
+    subscriptions.pop(user_id, None)
+    remove_username_mapping(username)
+
+    telegram_id = user.get("telegram_id")
+    if telegram_id:
+        remove_telegram_mapping(telegram_id)
+        admins.pop(str(telegram_id), None)
+
+    save_json(USERS_FILE, users)
+    save_json(SUBSCRIPTIONS_FILE, subscriptions)
+    save_json(ADMINS_FILE, admins)
+    save_json(TELEGRAM_MAPPING_FILE, telegram_to_userid)
+    return True
+
+
 
 # -------------------------------------------------
 # UPDATE HANDLER
@@ -1672,6 +1722,7 @@ def handle_update(update):
             username = callback["from"].get("username", "N/A")
             first_name = callback["from"].get("first_name", "User")
             data = callback["data"]
+            is_admin = str(tg_id) in admins
             
             # Log callback query
             activity_logger.info(f"CALLBACK | User: {first_name} (@{username}) | TG_ID: {tg_id} | Data: {data}")
@@ -1723,10 +1774,94 @@ def handle_update(update):
                 )
                 
                 return
+
+            if data.startswith("user:"):
+                if not is_admin:
+                    send_message(chat_id, "❌ Admin access required.")
+                    return
+
+                user_id = data.split(":", 1)[1]
+                user = users.get(user_id)
+                if not user:
+                    send_message(chat_id, "❌ User not found.")
+                    return
+
+                keyboard = [
+                    [{"text": "ℹ️ Sub Info", "callback_data": f"user_action:{user_id}:subinfo"}],
+                    [{"text": "➕ Extend Sub", "callback_data": f"user_action:{user_id}:subextend"}],
+                    [{"text": "⛔ End Sub", "callback_data": f"user_action:{user_id}:subend"}],
+                    [{"text": "⬆️ Upgrade", "callback_data": f"user_action:{user_id}:upgrade"}],
+                    [{"text": "⬇️ Downgrade", "callback_data": f"user_action:{user_id}:downgrade"}],
+                    [{"text": "🔗 Link TG", "callback_data": f"user_action:{user_id}:link"}],
+                    [{"text": "🔓 Unlink TG", "callback_data": f"user_action:{user_id}:unlink"}],
+                    [{"text": "🗑️ Delete User", "callback_data": f"user_action:{user_id}:delete"}],
+                ]
+
+                send_message(
+                    chat_id,
+                    f"Manage user: {user.get('username')}\nRole: {user.get('role', ROLE_REGULAR)}",
+                    reply_markup=json.dumps({"inline_keyboard": keyboard})
+                )
+                return
+
+            if data.startswith("user_action:"):
+                if not is_admin:
+                    send_message(chat_id, "❌ Admin access required.")
+                    return
+
+                _, user_id, action = data.split(":", 2)
+                user = users.get(user_id)
+                if not user:
+                    send_message(chat_id, "❌ User not found.")
+                    return
+
+                username_value = user.get("username", user_id)
+
+                if action == "subinfo":
+                    handle_subinfo(chat_id, tg_id, username_value)
+                    return
+
+                if action == "subend":
+                    handle_subend(chat_id, tg_id, username_value)
+                    return
+
+                if action == "upgrade":
+                    success, result = handle_admin_upgrade(user_id, user)
+                    if success:
+                        send_message(chat_id, f"✅ User `{username_value}` upgraded to {result}.", parse_mode="Markdown")
+                        if user.get("telegram_id"):
+                            send_message(user["telegram_id"], f"✅ Your role has been upgraded to {result}.")
+                    else:
+                        send_message(chat_id, f"ℹ️ {result}")
+                    return
+
+                if action == "downgrade":
+                    set_admin_user_action(tg_id, "downgrade", user_id)
+                    send_message(chat_id, "Enter the new role: regular or privileged")
+                    return
+
+                if action == "subextend":
+                    set_admin_user_action(tg_id, "subextend", user_id)
+                    send_message(chat_id, "Enter number of days to extend the subscription:")
+                    return
+
+                if action == "link":
+                    set_admin_user_action(tg_id, "link", user_id)
+                    send_message(chat_id, "Send the Telegram ID to link to this user:")
+                    return
+
+                if action == "unlink":
+                    handle_admin_unlink(chat_id, tg_id, [username_value])
+                    return
+
+                if action == "delete":
+                    if handle_admin_delete(user_id, user):
+                        send_message(chat_id, f"✅ User `{username_value}` deleted.", parse_mode="Markdown")
+                    else:
+                        send_message(chat_id, f"❌ Failed to delete `{username_value}`.", parse_mode="Markdown")
+                    return
             
             # Admin approval/rejection actions
-            is_admin = str(tg_id) in admins
-            
             if is_admin:
                 parts = data.split(":")
                 action = parts[0]
@@ -2413,6 +2548,50 @@ def handle_update(update):
                 # If neither photo nor video but we got here, there's an issue
                 return
             
+            if is_admin and tg_id in admin_user_actions and "text" in message and not message["text"].startswith("/"):
+                action_payload = admin_user_actions.get(tg_id, {})
+                action = action_payload.get("action")
+                target_user_id = action_payload.get("user_id")
+                target_user = users.get(target_user_id)
+                if not target_user:
+                    clear_admin_user_action(tg_id)
+                    send_message(chat_id, "❌ User not found.")
+                    return
+
+                text_value = message["text"].strip()
+                target_username = target_user.get("username", target_user_id)
+
+                if action == "subextend":
+                    try:
+                        days = int(text_value)
+                        if days <= 0:
+                            raise ValueError
+                    except ValueError:
+                        send_message(chat_id, "❌ Days must be a positive number.")
+                        return
+                    clear_admin_user_action(tg_id)
+                    handle_subextend(chat_id, tg_id, [target_username, str(days)])
+                    return
+
+                if action == "downgrade":
+                    role_value = text_value.lower()
+                    if role_value not in [ROLE_REGULAR, ROLE_PRIVILEGED]:
+                        send_message(chat_id, "❌ Invalid role. Use: regular or privileged.")
+                        return
+                    clear_admin_user_action(tg_id)
+                    handle_admin_downgrade(chat_id, tg_id, [target_username, role_value])
+                    return
+
+                if action == "link":
+                    try:
+                        telegram_id_value = int(text_value)
+                    except ValueError:
+                        send_message(chat_id, "❌ Telegram ID must be a number.")
+                        return
+                    clear_admin_user_action(tg_id)
+                    handle_admin_link(chat_id, tg_id, [target_username, str(telegram_id_value)])
+                    return
+
             # Handle commands
             if "text" in message and message["text"].startswith("/"):
                 text = message["text"]
@@ -2426,6 +2605,7 @@ def handle_update(update):
                     broadcast_mode.pop(tg_id, None)
                     target_broadcast.pop(tg_id, None)
                     awaiting_username.pop(tg_id, None)
+                    clear_admin_user_action(tg_id)
                     send_message(chat_id, "✅ Cancelled.")
                     logging.info(f"User {tg_id} cancelled current operation")
                     return
