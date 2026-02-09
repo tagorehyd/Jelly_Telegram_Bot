@@ -1135,7 +1135,7 @@ def handle_users(chat_id, tg_id):
     if command_lines:
         user_list += "\n\n" + "\n".join(command_lines)
 
-    send_message(chat_id, user_list, parse_mode="Markdown")
+    send_message(chat_id, user_list)
 
 def handle_broadcast(chat_id, tg_id):
     """Handle /broadcast command (admin only)"""
