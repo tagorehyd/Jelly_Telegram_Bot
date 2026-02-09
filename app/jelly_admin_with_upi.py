@@ -26,6 +26,7 @@ from bot.telegram_api import (
     send_message as send_message_api,
     send_photo as send_photo_api,
     send_video as send_video_api,
+    delete_message as delete_message_api,
 )
 
 # -------------------------------------------------
@@ -73,6 +74,7 @@ broadcast_mode = {}
 target_broadcast = {}
 awaiting_username = {}  # Track users who need to provide username: {tg_id: {name, requested_at}}
 username_to_uid = {}  # Fast username lookup: {username.lower(): jellyfin_user_id}
+admin_request_messages = {}
 
 # -------------------------------------------------
 # API WRAPPERS
@@ -112,6 +114,33 @@ def send_photo(chat_id, photo, caption=None, reply_markup=None):
 
 def send_video(chat_id, video, caption=None, reply_markup=None):
     return send_video_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, video, caption, reply_markup)
+
+
+def delete_message(chat_id, message_id):
+    return delete_message_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, message_id)
+
+
+def record_admin_request(request_key, admin_id, message_id):
+    if not request_key or not message_id:
+        return
+    admin_request_messages.setdefault(request_key, {})[admin_id] = message_id
+
+
+def revoke_admin_request(request_key):
+    messages = admin_request_messages.pop(request_key, {})
+    for admin_id, message_id in messages.items():
+        delete_message(admin_id, message_id)
+
+
+def notify_admins(request_key, text, reply_markup=None, parse_mode=None):
+    for admin_id in admins:
+        message_id = send_message(admin_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
+        record_admin_request(request_key, admin_id, message_id)
+
+
+def notify_admins_notice(text, parse_mode=None):
+    for admin_id in admins:
+        send_message(admin_id, text, parse_mode=parse_mode)
 
 # -------------------------------------------------
 # JELLYFIN USER BOOTSTRAP (SECOND RUN)
@@ -926,20 +955,19 @@ def handle_resetpw(chat_id, tg_id):
     
     send_message(chat_id, "🔐 Password reset request submitted.\n\nPlease wait for admin approval.")
     
-    # Notify admins
-    for admin_id in admins:
-        send_message(
-            admin_id,
-            f"🔐 Password reset request:\n\n"
-            f"Username: {user['username']}\n"
-            f"Telegram ID: {tg_id}",
-            reply_markup=json.dumps({
-                "inline_keyboard": [[
-                    {"text": "✅ Approve", "callback_data": f"reset_ok:{tg_id}"},
-                    {"text": "❌ Reject", "callback_data": f"reset_no:{tg_id}"}
-                ]]
-            })
-        )
+    request_key = f"reset:{tg_id}"
+    notify_admins(
+        request_key,
+        f"🔐 Password reset request:\n\n"
+        f"Username: {user['username']}\n"
+        f"Telegram ID: {tg_id}",
+        reply_markup=json.dumps({
+            "inline_keyboard": [[
+                {"text": "✅ Approve", "callback_data": f"reset_ok:{tg_id}"},
+                {"text": "❌ Reject", "callback_data": f"reset_no:{tg_id}"}
+            ]]
+        })
+    )
 
 def handle_pending(chat_id, tg_id):
     """Handle /pending command (admin only)"""
@@ -953,10 +981,11 @@ def handle_pending(chat_id, tg_id):
     
     for uid, p in pending.items():
         request_type = p.get("type", "register")
+        request_key = f"{request_type}:{uid}"
         
         if request_type == "link":
             # Link request
-            send_message(
+            message_id = send_message(
                 chat_id,
                 f"🔗 Link Request:\n\n"
                 f"👤 Name: {p['name']}\n"
@@ -969,9 +998,10 @@ def handle_pending(chat_id, tg_id):
                     ]]
                 })
             )
+            record_admin_request(request_key, chat_id, message_id)
         elif request_type == "unlink":
             # Unlink request
-            send_message(
+            message_id = send_message(
                 chat_id,
                 f"🔓 Unlink Request:\n\n"
                 f"👤 Username: {p['username']}\n"
@@ -983,9 +1013,10 @@ def handle_pending(chat_id, tg_id):
                     ]]
                 })
             )
+            record_admin_request(request_key, chat_id, message_id)
         else:
             # Registration request
-            send_message(
+            message_id = send_message(
                 chat_id,
                 f"📨 Registration Request:\n\n"
                 f"Name: {p['name']}\n"
@@ -998,6 +1029,7 @@ def handle_pending(chat_id, tg_id):
                     ]]
                 })
             )
+            record_admin_request(request_key, chat_id, message_id)
 
 
 def handle_users(chat_id, tg_id):
@@ -1357,22 +1389,21 @@ def handle_linkme(chat_id, tg_id, username_to_link, first_name):
         parse_mode="Markdown"
     )
     
-    # Notify admins
-    for admin_id in admins:
-        send_message(
-            admin_id,
-            f"🔗 Account Link Request:\n\n"
-            f"👤 Telegram Name: {first_name}\n"
-            f"🆔 Telegram ID: {tg_id}\n"
-            f"🎬 Jellyfin Username: {username_to_link}\n\n"
-            f"⚠️ User wants to link their Telegram to existing Jellyfin account.",
-            reply_markup=json.dumps({
-                "inline_keyboard": [[
-                    {"text": "✅ Approve Link", "callback_data": f"link_approve:{tg_id}"},
-                    {"text": "❌ Reject Link", "callback_data": f"link_reject:{tg_id}"}
-                ]]
-            })
-        )
+    request_key = f"link:{tg_id}"
+    notify_admins(
+        request_key,
+        f"🔗 Account Link Request:\n\n"
+        f"👤 Telegram Name: {first_name}\n"
+        f"🆔 Telegram ID: {tg_id}\n"
+        f"🎬 Jellyfin Username: {username_to_link}\n\n"
+        f"⚠️ User wants to link their Telegram to existing Jellyfin account.",
+        reply_markup=json.dumps({
+            "inline_keyboard": [[
+                {"text": "✅ Approve Link", "callback_data": f"link_approve:{tg_id}"},
+                {"text": "❌ Reject Link", "callback_data": f"link_reject:{tg_id}"}
+            ]]
+        })
+    )
     
     logging.info(f"Link request from Telegram {tg_id} to Jellyfin user {username_to_link}")
 
@@ -1404,21 +1435,20 @@ def handle_unlinkme(chat_id, tg_id):
         parse_mode="Markdown"
     )
     
-    # Notify admins
-    for admin_id in admins:
-        send_message(
-            admin_id,
-            f"🔓 Account Unlink Request:\n\n"
-            f"👤 User: {user['username']}\n"
-            f"🆔 Telegram ID: {tg_id}\n\n"
-            f"⚠️ User wants to unlink their Telegram account.",
-            reply_markup=json.dumps({
-                "inline_keyboard": [[
-                    {"text": "✅ Approve Unlink", "callback_data": f"unlink_approve:{tg_id}"},
-                    {"text": "❌ Reject Unlink", "callback_data": f"unlink_reject:{tg_id}"}
-                ]]
-            })
-        )
+    request_key = f"unlink:{tg_id}"
+    notify_admins(
+        request_key,
+        f"🔓 Account Unlink Request:\n\n"
+        f"👤 User: {user['username']}\n"
+        f"🆔 Telegram ID: {tg_id}\n\n"
+        f"⚠️ User wants to unlink their Telegram account.",
+        reply_markup=json.dumps({
+            "inline_keyboard": [[
+                {"text": "✅ Approve Unlink", "callback_data": f"unlink_approve:{tg_id}"},
+                {"text": "❌ Reject Unlink", "callback_data": f"unlink_reject:{tg_id}"}
+            ]]
+        })
+    )
     
     logging.info(f"Unlink request from user {tg_id} ({user['username']})")
 
@@ -1608,6 +1638,7 @@ def handle_update(update):
                 uid = parts[1] if len(parts) > 1 else None
                 
                 if action == "approve":
+                    request_key = f"register:{uid}"
                     with approval_lock:
                         p = pending.get(uid)
                         if not p:
@@ -1672,6 +1703,9 @@ def handle_update(update):
                         pending.pop(uid, None)
                         safe_file_save(PENDING_FILE, pending, "pending requests")
                         
+                        revoke_admin_request(request_key)
+                        approver_label = f"{first_name} (@{username})" if username != "N/A" else first_name
+
                         # Notify user
                         try:
                             send_message(uid_int,
@@ -1690,11 +1724,19 @@ def handle_update(update):
                         send_message(chat_id, f"✅ User `{p['username']}` approved and created successfully.\n\n"
                                     f"Jellyfin ID: {jellyfin_id}\n"
                                     f"Account is disabled until subscription.", parse_mode="Markdown")
+                        notify_admins_notice(
+                            f"✅ Registration approved by {approver_label}\n\n"
+                            f"Username: `{p['username']}`\n"
+                            f"Telegram ID: {uid}",
+                            parse_mode="Markdown"
+                        )
                         logging.info(f"User {uid} ({p['username']}) approved by admin {tg_id}, jellyfin_id: {jellyfin_id}")
                 
                 elif action == "reject":
+                    request_key = f"register:{uid}"
                     p = pending.pop(uid, None)
                     if p:
+                        revoke_admin_request(request_key)
                         save_json(PENDING_FILE, pending)
                         send_message(uid, "❌ Your registration request was declined.\n\nPlease contact an administrator if you believe this was a mistake.")
                         send_message(chat_id, f"✅ Registration request for `{p.get('username', 'user')}` rejected.", parse_mode="Markdown")
@@ -1704,6 +1746,7 @@ def handle_update(update):
                 
                 elif action == "reset_ok":
                     # uid here is telegram_id from callback, need to get jellyfin user_id
+                    request_key = f"reset:{uid}"
                     user_id, user = get_user_by_telegram_id(uid)
                     if not user:
                         send_message(chat_id, "❌ User not found in system.")
@@ -1711,8 +1754,15 @@ def handle_update(update):
                     
                     password = generate_password()
                     if jellyfin_reset_password(user["username"], password):
+                        revoke_admin_request(request_key)
+                        approver_label = f"{first_name} (@{username})" if username != "N/A" else first_name
                         send_message(uid, f"✅ Password reset approved!\n\n🔐 Your new Jellyfin password:\n\n`{password}`\n\nPlease save this securely.", parse_mode="Markdown")
                         send_message(chat_id, f"✅ Password reset for `{user['username']}` completed.", parse_mode="Markdown")
+                        notify_admins_notice(
+                            f"✅ Password reset approved by {approver_label}\n\n"
+                            f"Username: `{user['username']}`",
+                            parse_mode="Markdown"
+                        )
                         logging.info(f"Password reset for user {user_id} (telegram {uid}) approved by admin {tg_id}")
                     else:
                         send_message(chat_id, f"❌ Failed to reset password for `{user['username']}`.", parse_mode="Markdown")
@@ -1720,8 +1770,10 @@ def handle_update(update):
                 
                 elif action == "reset_no":
                     # uid here is telegram_id from callback, need to get jellyfin user_id
+                    request_key = f"reset:{uid}"
                     user_id, user = get_user_by_telegram_id(uid)
                     if user:
+                        revoke_admin_request(request_key)
                         send_message(uid, "❌ Your password reset request was declined.\n\nPlease contact an administrator if you need assistance.")
                         send_message(chat_id, f"✅ Password reset request for `{user['username']}` rejected.", parse_mode="Markdown")
                         logging.info(f"Password reset for user {user_id} (telegram {uid}) rejected by admin {tg_id}")
@@ -1731,6 +1783,7 @@ def handle_update(update):
                 elif action == "pay_approve":
                     # Format: pay_approve:request_id
                     request_id = uid
+                    request_key = f"pay:{request_id}"
                     
                     if request_id not in payment_requests:
                         send_message(chat_id, "⚠️ Payment request not found or already processed.")
@@ -1760,6 +1813,8 @@ def handle_update(update):
                     payment_requests[request_id]["approved_by"] = str(tg_id)
                     payment_requests[request_id]["approved_at"] = int(time.time())
                     save_json(PAYMENT_REQUESTS_FILE, payment_requests)
+                    revoke_admin_request(request_key)
+                    approver_label = f"{first_name} (@{username})" if username != "N/A" else first_name
                     
                     # Notify user (send to telegram_id)
                     send_message(
@@ -1782,12 +1837,20 @@ def handle_update(update):
                         f"Expires: {expiry_date}",
                         parse_mode="Markdown"
                     )
+                    notify_admins_notice(
+                        f"✅ Payment approved by {approver_label}\n\n"
+                        f"Username: `{users[user_id]['username']}`\n"
+                        f"Plan: {plan['name']}\n"
+                        f"Expires: {expiry_date}",
+                        parse_mode="Markdown"
+                    )
                     
                     logging.info(f"Payment {request_id} approved by admin {tg_id} for user {user_id} (telegram_id: {telegram_id})")
                 
                 elif action == "pay_reject":
                     # Format: pay_reject:request_id
                     request_id = uid
+                    request_key = f"pay:{request_id}"
                     
                     if request_id not in payment_requests:
                         send_message(chat_id, "⚠️ Payment request not found or already processed.")
@@ -1802,6 +1865,7 @@ def handle_update(update):
                     payment_requests[request_id]["rejected_by"] = str(tg_id)
                     payment_requests[request_id]["rejected_at"] = int(time.time())
                     save_json(PAYMENT_REQUESTS_FILE, payment_requests)
+                    revoke_admin_request(request_key)
                     
                     # Notify user (send to telegram_id)
                     if user_id in users:
@@ -1825,6 +1889,7 @@ def handle_update(update):
                     logging.info(f"Payment {request_id} rejected by admin {tg_id}")
                 
                 elif action == "link_approve":
+                    request_key = f"link:{uid}"
                     # Approve link request
                     if uid not in pending:
                         send_message(chat_id, "⚠️ Link request not found or already processed.")
@@ -1874,6 +1939,9 @@ def handle_update(update):
                     pending.pop(uid, None)
                     safe_file_save(PENDING_FILE, pending, "pending requests")
                     
+                    revoke_admin_request(request_key)
+                    approver_label = f"{first_name} (@{username})" if username != "N/A" else first_name
+
                     # Notify user
                     try:
                         send_message(
@@ -1894,13 +1962,21 @@ def handle_update(update):
                         f"👤 Jellyfin User: {users[jellyfin_user_id]['username']}",
                         parse_mode="Markdown"
                     )
+                    notify_admins_notice(
+                        f"✅ Link approved by {approver_label}\n\n"
+                        f"Telegram ID: {uid}\n"
+                        f"Jellyfin User: `{users[jellyfin_user_id]['username']}`",
+                        parse_mode="Markdown"
+                    )
                     
                     logging.info(f"Link approved by admin {tg_id}: Telegram {uid} → Jellyfin {users[jellyfin_user_id]['username']}")
                 
                 elif action == "link_reject":
+                    request_key = f"link:{uid}"
                     # Reject link request
                     p = pending.pop(uid, None)
                     if p:
+                        revoke_admin_request(request_key)
                         save_json(PENDING_FILE, pending)
                         send_message(uid, "❌ Your link request was declined.\n\nPlease contact an administrator if you believe this was a mistake.")
                         send_message(chat_id, f"✅ Link request rejected for Telegram ID {uid}.")
@@ -1909,6 +1985,7 @@ def handle_update(update):
                         send_message(chat_id, "⚠️ Link request not found or already processed.")
                 
                 elif action == "unlink_approve":
+                    request_key = f"unlink:{uid}"
                     # Approve unlink request
                     user_id, user = get_user_by_telegram_id(uid)
                     if not user_id:
@@ -1927,6 +2004,8 @@ def handle_update(update):
                     # Remove from pending
                     pending.pop(uid, None)
                     save_json(PENDING_FILE, pending)
+                    revoke_admin_request(request_key)
+                    approver_label = f"{first_name} (@{username})" if username != "N/A" else first_name
                     
                     # Notify user
                     send_message(
@@ -1945,15 +2024,23 @@ def handle_update(update):
                         f"🆔 Telegram ID: {uid}",
                         parse_mode="Markdown"
                     )
+                    notify_admins_notice(
+                        f"✅ Unlink approved by {approver_label}\n\n"
+                        f"User: `{username}`\n"
+                        f"Telegram ID: {uid}",
+                        parse_mode="Markdown"
+                    )
                     
                     logging.info(f"Unlink approved by admin {tg_id} for user {username}")
                 
                 elif action == "unlink_reject":
+                    request_key = f"unlink:{uid}"
                     # Reject unlink request
                     if uid in pending:
                         username = pending[uid].get("username", "User")
                         pending.pop(uid, None)
                         save_json(PENDING_FILE, pending)
+                        revoke_admin_request(request_key)
                         send_message(uid, "❌ Your unlink request was declined.\n\nPlease contact an administrator if you need assistance.")
                         send_message(chat_id, f"✅ Unlink request rejected for user {username}.")
                         logging.info(f"Unlink request rejected by admin {tg_id} for user {username}")
@@ -2032,20 +2119,20 @@ def handle_update(update):
                 )
                 
                 # Notify admins
-                for admin_id in admins:
-                    send_message(
-                        admin_id,
-                        f"📨 New registration request:\n\n"
-                        f"Name: {user_data['name']}\n"
-                        f"Username: {text}\n"
-                        f"Telegram ID: {tg_id}",
-                        reply_markup=json.dumps({
-                            "inline_keyboard": [[
-                                {"text": "✅ Approve", "callback_data": f"approve:{tg_id}"},
-                                {"text": "❌ Reject", "callback_data": f"reject:{tg_id}"}
-                            ]]
-                        })
-                    )
+                request_key = f"register:{tg_id}"
+                notify_admins(
+                    request_key,
+                    f"📨 New registration request:\n\n"
+                    f"Name: {user_data['name']}\n"
+                    f"Username: {text}\n"
+                    f"Telegram ID: {tg_id}",
+                    reply_markup=json.dumps({
+                        "inline_keyboard": [[
+                            {"text": "✅ Approve", "callback_data": f"approve:{tg_id}"},
+                            {"text": "❌ Reject", "callback_data": f"reject:{tg_id}"}
+                        ]]
+                    })
+                )
                 
                 logging.info(f"Registration request from {tg_id} with username '{text}'")
                 return
@@ -2078,8 +2165,9 @@ def handle_update(update):
                         # Forward screenshot to all admins with error tracking
                         successful_sends = 0
                         failed_sends = 0
+                        request_key = f"pay:{pending_payment}"
                         for admin_id in admins:
-                            success = send_photo(
+                            message_id = send_photo(
                                 admin_id,
                                 message["photo"][-1]["file_id"],
                                 caption=f"🚨 💳 PAYMENT SCREENSHOT 💳 🚨\n\n"
@@ -2096,10 +2184,11 @@ def handle_update(update):
                                     ]]
                                 })
                             )
-                            if success:
+                            if message_id:
                                 successful_sends += 1
                             else:
                                 failed_sends += 1
+                            record_admin_request(request_key, admin_id, message_id)
                         
                         logging.info(f"PAYMENT SCREENSHOT from user {tg_id} for request {pending_payment}: sent to {successful_sends}/{len(admins)} admins")
                         
@@ -2141,9 +2230,9 @@ def handle_update(update):
                         # Video related to payment - mark as important
                         plan_id = payment_requests[pending_payment]["plan_id"]
                         plan = config["subscription_plans"][plan_id]
-                        
+                        request_key = f"pay:{pending_payment}"
                         for admin_id in admins:
-                            send_video(
+                            message_id = send_video(
                                 admin_id,
                                 message["video"]["file_id"],
                                 caption=f"🚨 💳 PAYMENT VIDEO 💳 🚨\n\n"
@@ -2160,6 +2249,7 @@ def handle_update(update):
                                     ]]
                                 })
                             )
+                            record_admin_request(request_key, admin_id, message_id)
                         logging.info(f"PAYMENT VIDEO from user {tg_id} for request {pending_payment} forwarded to admins")
                         send_message(
                             chat_id,
