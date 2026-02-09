@@ -732,6 +732,7 @@ def handle_start(chat_id, tg_id, first_name):
                 "👥 User Management:\n"
                 "/link <username> <telegram_id> - Link user to Telegram ID\n"
                 "/unlink <username> - Unlink user from Telegram ID\n\n"
+                "/downgrade <username> <role> - Downgrade user role\n\n"
                 "💳 Subscription Management:\n"
                 "/subinfo <username> - View subscription details\n"
                 "/subextend <username> <days> - Extend subscription\n"
@@ -765,7 +766,8 @@ def handle_start(chat_id, tg_id, first_name):
                     "/subscribe - Renew subscription\n"
                     "/status - Check subscription\n"
                     "/resetpw - Reset password\n"
-                    "/unlinkme - Unlink Telegram account"
+                    "/unlinkme - Unlink Telegram account\n"
+                    "/upgrade - Request role upgrade"
                 )
             elif active and not expires_at:
                 # Edge case: user has permanent access but role not set correctly
@@ -776,7 +778,8 @@ def handle_start(chat_id, tg_id, first_name):
                     "Commands:\n"
                     "/status - Check status\n"
                     "/resetpw - Reset password\n"
-                    "/unlinkme - Unlink Telegram account"
+                    "/unlinkme - Unlink Telegram account\n"
+                    "/upgrade - Request role upgrade"
                 )
             else:
                 send_message(chat_id,
@@ -786,7 +789,8 @@ def handle_start(chat_id, tg_id, first_name):
                     "Use /subscribe to renew your access!\n\n"
                     "Other commands:\n"
                     "/resetpw - Reset password\n"
-                    "/unlinkme - Unlink Telegram account"
+                    "/unlinkme - Unlink Telegram account\n"
+                    "/upgrade - Request role upgrade"
                 )
             return
     else:
@@ -1452,6 +1456,57 @@ def handle_unlinkme(chat_id, tg_id):
     
     logging.info(f"Unlink request from user {tg_id} ({user['username']})")
 
+
+def handle_upgrade(chat_id, tg_id):
+    """Handle /upgrade command - request role upgrade"""
+    user_id, user = get_user_by_telegram_id(tg_id)
+    if not user:
+        send_message(chat_id, "❌ You are not registered.")
+        return
+
+    role = user.get("role", ROLE_REGULAR)
+    if role == ROLE_ADMIN:
+        send_message(chat_id, "👑 You are already an admin.")
+        return
+
+    if str(tg_id) in pending and pending[str(tg_id)].get("type") == "role_upgrade":
+        send_message(chat_id, "⏳ You already have a pending upgrade request. Please wait for admin approval.")
+        return
+
+    target_role = ROLE_PRIVILEGED if role == ROLE_REGULAR else ROLE_ADMIN
+    pending[str(tg_id)] = {
+        "name": user.get("name", "User"),
+        "username": user.get("username"),
+        "requested_at": int(time.time()),
+        "type": "role_upgrade",
+        "current_role": role,
+        "target_role": target_role
+    }
+    save_json(PENDING_FILE, pending)
+
+    send_message(
+        chat_id,
+        f"⬆️ Upgrade request submitted!\n\n"
+        f"Current role: {role}\n"
+        f"Requested role: {target_role}\n\n"
+        f"⏳ Please wait for an admin to approve your request."
+    )
+
+    request_key = f"role_upgrade:{tg_id}"
+    notify_admins(
+        request_key,
+        f"⬆️ Role Upgrade Request:\n\n"
+        f"👤 User: {user.get('username')}\n"
+        f"🆔 Telegram ID: {tg_id}\n"
+        f"🔼 From: {role} → {target_role}",
+        reply_markup=json.dumps({
+            "inline_keyboard": [[
+                {"text": "✅ Approve Upgrade", "callback_data": f"role_upgrade:{tg_id}"},
+                {"text": "❌ Reject Upgrade", "callback_data": f"role_upgrade_reject:{tg_id}"}
+            ]]
+        })
+    )
+
 def handle_admin_link(chat_id, tg_id, args):
     """Handle /link command (admin only) - admin links user to telegram"""
     if str(tg_id) not in admins:
@@ -1554,6 +1609,46 @@ def handle_admin_unlink(chat_id, tg_id, args):
         logging.warning(f"Could not notify user {old_telegram_id}: {e}")
     
     logging.info(f"Admin {tg_id} unlinked user {username_to_unlink} from Telegram {old_telegram_id}")
+
+
+def handle_admin_downgrade(chat_id, tg_id, args):
+    """Handle /downgrade command (admin only) - admin downgrades user role"""
+    if str(tg_id) not in admins:
+        send_message(chat_id, "❌ Admin access required.")
+        return
+
+    if len(args) < 2:
+        send_message(chat_id, "❌ Usage: /downgrade <username> <role>\n\nRoles: regular, privileged")
+        return
+
+    username = args[0]
+    target_role = args[1].lower()
+    if target_role not in [ROLE_REGULAR, ROLE_PRIVILEGED]:
+        send_message(chat_id, "❌ Invalid role. Use: regular or privileged.")
+        return
+
+    target_uid, user = get_user_by_username(username)
+    if not target_uid:
+        send_message(chat_id, f"❌ User '{username}' not found.")
+        return
+
+    if user.get("role") == target_role:
+        send_message(chat_id, f"ℹ️ User '{username}' is already {target_role}.")
+        return
+
+    users[target_uid]["role"] = target_role
+    users[target_uid]["is_admin"] = target_role == ROLE_ADMIN
+    save_json(USERS_FILE, users)
+
+    send_message(chat_id, f"✅ User `{username}` downgraded to {target_role}.", parse_mode="Markdown")
+
+    telegram_id = user.get("telegram_id")
+    if telegram_id:
+        send_message(
+            telegram_id,
+            f"⚠️ Your role has been changed by an admin.\n\n"
+            f"New role: {target_role}"
+        )
 
 
 
@@ -2046,6 +2141,50 @@ def handle_update(update):
                         logging.info(f"Unlink request rejected by admin {tg_id} for user {username}")
                     else:
                         send_message(chat_id, "⚠️ Unlink request not found or already processed.")
+                
+                elif action == "role_upgrade":
+                    request_key = f"role_upgrade:{uid}"
+                    p = pending.get(uid)
+                    if not p or p.get("type") != "role_upgrade":
+                        send_message(chat_id, "⚠️ Upgrade request not found or already processed.")
+                        return
+
+                    user_id, user = get_user_by_telegram_id(uid)
+                    if not user:
+                        send_message(chat_id, "❌ User not found in system.")
+                        return
+
+                    target_role = p.get("target_role", ROLE_PRIVILEGED)
+                    users[user_id]["role"] = target_role
+                    users[user_id]["is_admin"] = target_role == ROLE_ADMIN
+                    save_json(USERS_FILE, users)
+
+                    pending.pop(uid, None)
+                    save_json(PENDING_FILE, pending)
+                    revoke_admin_request(request_key)
+
+                    approver_label = f"{first_name} (@{username})" if username != "N/A" else first_name
+                    send_message(
+                        int(uid),
+                        f"✅ Your role upgrade has been approved!\n\nNew role: {target_role}"
+                    )
+                    notify_admins_notice(
+                        f"✅ Role upgrade approved by {approver_label}\n\n"
+                        f"User: `{user.get('username')}`\n"
+                        f"Role: {target_role}",
+                        parse_mode="Markdown"
+                    )
+                
+                elif action == "role_upgrade_reject":
+                    request_key = f"role_upgrade:{uid}"
+                    if uid in pending and pending[uid].get("type") == "role_upgrade":
+                        pending.pop(uid, None)
+                        save_json(PENDING_FILE, pending)
+                        revoke_admin_request(request_key)
+                        send_message(uid, "❌ Your role upgrade request was declined.\n\nPlease contact an administrator if you need assistance.")
+                        send_message(chat_id, "✅ Role upgrade request rejected.")
+                    else:
+                        send_message(chat_id, "⚠️ Upgrade request not found or already processed.")
 
 
         
@@ -2364,6 +2503,9 @@ def handle_update(update):
                 elif cmd == "/unlinkme":
                     logging.debug(f"Executing /unlinkme for user {tg_id}")
                     handle_unlinkme(chat_id, tg_id)
+                elif cmd == "/upgrade":
+                    logging.debug(f"Executing /upgrade for user {tg_id}")
+                    handle_upgrade(chat_id, tg_id)
                 elif cmd == "/link":
                     parts = text.split()
                     logging.debug(f"Executing /link for admin {tg_id} with args: {parts[1:]}")
@@ -2372,6 +2514,10 @@ def handle_update(update):
                     parts = text.split()
                     logging.debug(f"Executing /unlink for admin {tg_id} with args: {parts[1:]}")
                     handle_admin_unlink(chat_id, tg_id, parts[1:])
+                elif cmd == "/downgrade":
+                    parts = text.split()
+                    logging.debug(f"Executing /downgrade for admin {tg_id} with args: {parts[1:]}")
+                    handle_admin_downgrade(chat_id, tg_id, parts[1:])
                 else:
                     # Unknown command
                     logging.warning(f"Unknown command from user {tg_id} (@{username}): {cmd}")
