@@ -14,6 +14,19 @@ from datetime import datetime, timedelta
 from bot.config_loader import CONFIG_FILE, SECRETS_FILE, load_config
 from bot.http_client import HTTP_SESSION, HTTP_TIMEOUT, POLL_LONG_TIMEOUT, POLL_TIMEOUT
 from bot.logging_setup import setup_logging
+from bot.jellyfin_api import (
+    fetch_users,
+    create_user,
+    get_user_id,
+    reset_password,
+    set_user_enabled,
+    username_available,
+)
+from bot.telegram_api import (
+    send_message as send_message_api,
+    send_photo as send_photo_api,
+    send_video as send_video_api,
+)
 
 # -------------------------------------------------
 # CONFIG LOADING + BOOTSTRAP
@@ -62,18 +75,47 @@ awaiting_username = {}  # Track users who need to provide username: {tg_id: {nam
 username_to_uid = {}  # Fast username lookup: {username.lower(): jellyfin_user_id}
 
 # -------------------------------------------------
-# JELLYFIN USER BOOTSTRAP (SECOND RUN)
+# API WRAPPERS
 # -------------------------------------------------
 
-def fetch_jellyfin_users():
-    resp = HTTP_SESSION.get(
-        f"{JELLYFIN_URL}/Users",
-        headers={"X-Emby-Token": JELLYFIN_API_KEY},
-        timeout=HTTP_TIMEOUT
-    )
-    resp.raise_for_status()
-    return resp.json()
+def jellyfin_create_user(username, password):
+    return create_user(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, username, password)
 
+
+def jellyfin_get_user_id(username):
+    return get_user_id(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, username)
+
+
+def jellyfin_enable_user(username):
+    return set_user_enabled(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, username, True)
+
+
+def jellyfin_disable_user(username):
+    return set_user_enabled(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, username, False)
+
+
+def jellyfin_reset_password(username, new_password):
+    return reset_password(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, username, new_password)
+
+
+def check_username_availability(username):
+    return username_available(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, username)
+
+
+def send_message(chat_id, text, reply_markup=None, parse_mode=None):
+    return send_message_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, text, reply_markup, parse_mode)
+
+
+def send_photo(chat_id, photo, caption=None, reply_markup=None):
+    return send_photo_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, photo, caption, reply_markup)
+
+
+def send_video(chat_id, video, caption=None, reply_markup=None):
+    return send_video_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, video, caption, reply_markup)
+
+# -------------------------------------------------
+# JELLYFIN USER BOOTSTRAP (SECOND RUN)
+# -------------------------------------------------
 
 def bootstrap_users_from_server():
     users_file = Path(config["storage"]["users"])
@@ -85,7 +127,7 @@ def bootstrap_users_from_server():
     print("🔄 Second run detected - Loading users from Jellyfin server...")
 
     try:
-        jelly_users = fetch_jellyfin_users()
+        jelly_users = fetch_users(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT)
     except Exception as e:
         print(f"❌ Failed to connect to Jellyfin server: {e}")
         print(f"⚠️ Make sure your Jellyfin URL is correct in {CONFIG_FILE} and API key is correct in {SECRETS_FILE}")
@@ -505,198 +547,9 @@ def get_user_by_telegram_id(tg_id):
         return user_id, users[user_id]
     return None, None
 
-def jellyfin_create_user(username, password):
-    """Create a new Jellyfin user"""
-    try:
-        resp = HTTP_SESSION.post(
-            f"{JELLYFIN_URL}/Users/New",
-            headers={"X-Emby-Token": JELLYFIN_API_KEY, "Content-Type": "application/json"},
-            json={"Name": username, "Password": password},
-            timeout=HTTP_TIMEOUT
-        )
-        if resp.status_code == 200:
-            logging.info(f"Jellyfin user '{username}' created successfully")
-            return True
-        else:
-            logging.error(f"Failed to create Jellyfin user '{username}': {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        logging.error(f"Error creating Jellyfin user '{username}': {e}")
-        return False
-
-def jellyfin_get_user_id(username):
-    """Get Jellyfin user ID by username"""
-    try:
-        resp = HTTP_SESSION.get(
-            f"{JELLYFIN_URL}/Users",
-            headers={"X-Emby-Token": JELLYFIN_API_KEY},
-            timeout=HTTP_TIMEOUT
-        )
-        if resp.status_code == 200:
-            for user in resp.json():
-                if user["Name"].lower() == username.lower():
-                    return user["Id"]
-        return None
-    except Exception as e:
-        logging.error(f"Error getting Jellyfin user ID for '{username}': {e}")
-        return None
-
-def jellyfin_enable_user(username):
-    """Enable a Jellyfin user"""
-    user_id = jellyfin_get_user_id(username)
-    if not user_id:
-        logging.error(f"Cannot enable user '{username}': User not found")
-        return False
-    
-    try:
-        # Get current user policy
-        resp = HTTP_SESSION.get(
-            f"{JELLYFIN_URL}/Users/{user_id}",
-            headers={"X-Emby-Token": JELLYFIN_API_KEY},
-            timeout=HTTP_TIMEOUT
-        )
-        if resp.status_code != 200:
-            logging.error(f"Failed to get user policy for '{username}'")
-            return False
-        
-        user_data = resp.json()
-        policy = user_data.get("Policy", {})
-        policy["IsDisabled"] = False
-        
-        # Update user policy
-        resp = HTTP_SESSION.post(
-            f"{JELLYFIN_URL}/Users/{user_id}/Policy",
-            headers={"X-Emby-Token": JELLYFIN_API_KEY, "Content-Type": "application/json"},
-            json=policy,
-            timeout=HTTP_TIMEOUT
-        )
-        
-        if resp.status_code == 204 or resp.status_code == 200:
-            logging.info(f"Jellyfin user '{username}' enabled successfully")
-            return True
-        else:
-            logging.error(f"Failed to enable Jellyfin user '{username}': {resp.status_code}")
-            return False
-    except Exception as e:
-        logging.error(f"Error enabling Jellyfin user '{username}': {e}")
-        return False
-
-def jellyfin_disable_user(username):
-    """Disable a Jellyfin user"""
-    user_id = jellyfin_get_user_id(username)
-    if not user_id:
-        logging.error(f"Cannot disable user '{username}': User not found")
-        return False
-    
-    try:
-        # Get current user policy
-        resp = HTTP_SESSION.get(
-            f"{JELLYFIN_URL}/Users/{user_id}",
-            headers={"X-Emby-Token": JELLYFIN_API_KEY},
-            timeout=HTTP_TIMEOUT
-        )
-        if resp.status_code != 200:
-            logging.error(f"Failed to get user policy for '{username}'")
-            return False
-        
-        user_data = resp.json()
-        policy = user_data.get("Policy", {})
-        policy["IsDisabled"] = True
-        
-        # Update user policy
-        resp = HTTP_SESSION.post(
-            f"{JELLYFIN_URL}/Users/{user_id}/Policy",
-            headers={"X-Emby-Token": JELLYFIN_API_KEY, "Content-Type": "application/json"},
-            json=policy,
-            timeout=HTTP_TIMEOUT
-        )
-        
-        if resp.status_code == 204 or resp.status_code == 200:
-            logging.info(f"Jellyfin user '{username}' disabled successfully")
-            return True
-        else:
-            logging.error(f"Failed to disable Jellyfin user '{username}': {resp.status_code}")
-            return False
-    except Exception as e:
-        logging.error(f"Error disabling Jellyfin user '{username}': {e}")
-        return False
-
-def jellyfin_reset_password(username, new_password):
-    """Reset password for a Jellyfin user"""
-    user_id = jellyfin_get_user_id(username)
-    if not user_id:
-        logging.error(f"Cannot reset password for '{username}': User not found")
-        return False
-    
-    try:
-        resp = HTTP_SESSION.post(
-            f"{JELLYFIN_URL}/Users/{user_id}/Password",
-            headers={"X-Emby-Token": JELLYFIN_API_KEY, "Content-Type": "application/json"},
-            json={"NewPw": new_password},
-            timeout=HTTP_TIMEOUT
-        )
-        
-        if resp.status_code == 204 or resp.status_code == 200:
-            logging.info(f"Password reset for Jellyfin user '{username}' successful")
-            return True
-        else:
-            logging.error(f"Failed to reset password for '{username}': {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        logging.error(f"Error resetting password for '{username}': {e}")
-        return False
-
 # -------------------------------------------------
 # TELEGRAM API FUNCTIONS
 # -------------------------------------------------
-
-def send_message(chat_id, text, reply_markup=None, parse_mode=None):
-    """Send a text message"""
-    payload = {"chat_id": chat_id, "text": text}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
-    try:
-        HTTP_SESSION.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=HTTP_TIMEOUT)
-    except Exception as e:
-        logging.error(f"Failed to send message to {chat_id}: {e}")
-
-def send_photo(chat_id, photo, caption=None, reply_markup=None):
-    """Send a photo"""
-    payload = {"chat_id": chat_id, "photo": photo}
-    if caption:
-        payload["caption"] = caption
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    try:
-        response = HTTP_SESSION.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=HTTP_TIMEOUT)
-        if response.status_code != 200:
-            logging.error(f"Failed to send photo to {chat_id}: {response.status_code} - {response.text}")
-        else:
-            logging.info(f"Photo sent successfully to {chat_id}")
-        return response.status_code == 200
-    except Exception as e:
-        logging.error(f"Failed to send photo to {chat_id}: {e}")
-        return False
-
-def send_video(chat_id, video, caption=None, reply_markup=None):
-    """Send a video"""
-    payload = {"chat_id": chat_id, "video": video}
-    if caption:
-        payload["caption"] = caption
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    try:
-        response = HTTP_SESSION.post(f"{TELEGRAM_API}/sendVideo", json=payload, timeout=HTTP_TIMEOUT)
-        if response.status_code != 200:
-            logging.error(f"Failed to send video to {chat_id}: {response.status_code} - {response.text}")
-        else:
-            logging.info(f"Video sent successfully to {chat_id}")
-        return response.status_code == 200
-    except Exception as e:
-        logging.error(f"Failed to send video to {chat_id}: {e}")
-        return False
 
 def generate_upi_qr(amount, plan_name):
     """Generate UPI payment link"""
@@ -957,30 +810,6 @@ def handle_register(chat_id, tg_id, username, first_name):
         f"Send /cancel to cancel registration."
     )
     logging.info(f"User {tg_id} started registration process")
-
-def check_username_availability(username):
-    """Check if username is available in Jellyfin - returns False on any error (safe default)"""
-    try:
-        resp = HTTP_SESSION.get(
-            f"{JELLYFIN_URL}/Users",
-            headers={"X-Emby-Token": JELLYFIN_API_KEY},
-            timeout=HTTP_TIMEOUT
-        )
-        if resp.status_code != 200:
-            logging.error(f"Jellyfin API error while checking username: {resp.status_code} - {resp.text}")
-            return False  # Safe default - assume not available on error
-        
-        existing_users = resp.json()
-        for user in existing_users:
-            if user["Name"].lower() == username.lower():
-                return False  # Username taken
-        return True  # Username available
-    except requests.exceptions.Timeout:
-        logging.error(f"Timeout checking username availability for '{username}'")
-        return False  # Safe default
-    except Exception as e:
-        logging.error(f"Error checking username availability for '{username}': {e}")
-        return False  # Safe default
 
 def validate_username(username):
     """Validate username format"""
