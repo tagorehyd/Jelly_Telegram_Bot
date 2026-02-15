@@ -86,6 +86,7 @@ awaiting_username = {}  # Track users who need to provide username: {tg_id: {nam
 username_to_uid = {}  # Fast username lookup: {username.lower(): jellyfin_user_id}
 admin_request_messages = {}
 admin_user_actions = {}
+admin_user_flows = {}
 
 # -------------------------------------------------
 # API WRAPPERS
@@ -267,6 +268,38 @@ def update_admin_request_buttons(request_key, text):
 
 def clear_admin_user_action(tg_id):
     admin_user_actions.pop(tg_id, None)
+
+
+def start_admin_user_flow(tg_id, user_id):
+    admin_user_flows[tg_id] = {
+        "user_id": user_id,
+        "message_ids": []
+    }
+
+
+def track_admin_user_flow_message(tg_id, user_id, message_id):
+    if not message_id:
+        return
+    flow = admin_user_flows.get(tg_id)
+    if not flow or flow.get("user_id") != user_id:
+        return
+    flow.setdefault("message_ids", []).append(message_id)
+
+
+def clear_admin_user_flow(chat_id, tg_id, current_message_id=None):
+    flow = admin_user_flows.pop(tg_id, None)
+    message_ids = []
+    if flow:
+        message_ids.extend(flow.get("message_ids", []))
+    if current_message_id:
+        message_ids.append(current_message_id)
+
+    seen = set()
+    for mid in message_ids:
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        delete_message(chat_id, mid)
 
 # -------------------------------------------------
 # JELLYFIN USER BOOTSTRAP (SECOND RUN)
@@ -1357,6 +1390,7 @@ def build_user_action_keyboard(user_id, user):
         keyboard.append([{"text": "🔗 Link TG", "callback_data": f"user_action:{user_id}:link"}])
 
     keyboard.append([{"text": "📚 Libraries", "callback_data": f"user_action:{user_id}:libraries"}])
+    keyboard.append([{"text": "🧹 Clean Flow", "callback_data": f"user_action:{user_id}:clean"}])
     keyboard.append([{"text": "🗑️ Delete User", "callback_data": f"user_action:{user_id}:delete"}])
     return keyboard
 
@@ -2161,12 +2195,14 @@ def handle_update(update):
                     send_message(chat_id, "❌ User not found.")
                     return
                 keyboard = build_user_action_keyboard(user_id, user)
+                start_admin_user_flow(tg_id, user_id)
 
-                send_message(
+                flow_message_id = send_message(
                     chat_id,
                     f"Manage user: {user.get('username')}\nRole: {user.get('role', ROLE_REGULAR)}",
                     reply_markup=json.dumps({"inline_keyboard": keyboard})
                 )
+                track_admin_user_flow_message(tg_id, user_id, flow_message_id)
                 return
 
             if data.startswith("subextendopt:"):
@@ -2210,7 +2246,8 @@ def handle_update(update):
                     source_message_id=callback["message"]["message_id"],
                     chat_id=chat_id,
                 )
-                send_message(chat_id, "Enter custom number of days within 2 minutes.")
+                flow_message_id = send_message(chat_id, "Enter custom number of days within 2 minutes.")
+                track_admin_user_flow_message(tg_id, user_id, flow_message_id)
                 return
 
             if data.startswith("user_action:"):
@@ -2265,11 +2302,12 @@ def handle_update(update):
                             {"text": "✍️ Custom", "callback_data": f"subextendcustom:{user_id}"},
                         ],
                     ]
-                    send_message(
+                    flow_message_id = send_message(
                         chat_id,
                         "Select how much to extend the subscription:",
                         reply_markup=json.dumps({"inline_keyboard": keyboard})
                     )
+                    track_admin_user_flow_message(tg_id, user_id, flow_message_id)
                     return
 
                 if action == "link":
@@ -2283,6 +2321,10 @@ def handle_update(update):
 
                 if action == "libraries":
                     show_library_access_menu(chat_id, user_id)
+                    return
+
+                if action == "clean":
+                    clear_admin_user_flow(chat_id, tg_id, current_message_id=callback["message"]["message_id"])
                     return
 
                 if action == "delete":
@@ -3049,11 +3091,13 @@ def handle_update(update):
                 admin_user_actions.pop(tg_id, None)
                 # Reuse user action menu
                 keyboard = build_user_action_keyboard(user_id, user)
-                send_message(
+                start_admin_user_flow(tg_id, user_id)
+                flow_message_id = send_message(
                     chat_id,
                     f"Manage user: {user.get('username')}\nRole: {user.get('role', ROLE_REGULAR)}",
                     reply_markup=json.dumps({"inline_keyboard": keyboard})
                 )
+                track_admin_user_flow_message(tg_id, user_id, flow_message_id)
                 return
 
             # Handle commands
@@ -3070,6 +3114,7 @@ def handle_update(update):
                     target_broadcast.pop(tg_id, None)
                     awaiting_username.pop(tg_id, None)
                     clear_admin_user_action(tg_id)
+                    admin_user_flows.pop(tg_id, None)
                     send_message(chat_id, "✅ Cancelled.")
                     logging.info(f"User {tg_id} cancelled current operation")
                     return
