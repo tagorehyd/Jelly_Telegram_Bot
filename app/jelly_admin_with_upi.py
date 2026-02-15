@@ -1369,12 +1369,12 @@ def toggle_library_access(user_id, library_index):
 def build_user_action_keyboard(user_id, user):
     """Build user action buttons based on role/subscription applicability/link state."""
     keyboard = [
-        [{"text": "ℹ️ Sub Info", "callback_data": f"user_action:{user_id}:subinfo"}],
         [{"text": "📊 Stats", "callback_data": f"user_action:{user_id}:stats"}],
     ]
 
     role = user.get("role", ROLE_REGULAR)
     if role == ROLE_REGULAR:
+        keyboard.append([{"text": "ℹ️ Sub Info", "callback_data": f"user_action:{user_id}:subinfo"}])
         keyboard.append([{"text": "➕ Extend Sub", "callback_data": f"user_action:{user_id}:subextend"}])
         keyboard.append([{"text": "⛔ End Sub", "callback_data": f"user_action:{user_id}:subend"}])
 
