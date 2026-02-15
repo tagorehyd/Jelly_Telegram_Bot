@@ -101,3 +101,28 @@ def edit_message_reply_markup(session, timeout, api_base, chat_id, message_id, r
     except Exception as e:
         logging.error(f"Failed to edit reply markup for {message_id} in {chat_id}: {e}")
         return False
+
+
+
+def edit_message_text(session, timeout, api_base, chat_id, message_id, text, reply_markup=None, parse_mode=None):
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    try:
+        response = session.post(f"{api_base}/editMessageText", json=payload, timeout=timeout)
+        if response.status_code != 200:
+            logging.error(
+                f"Failed to edit text for {message_id} in {chat_id}: "
+                f"{response.status_code} - {response.text}"
+            )
+            return False
+        data = response.json()
+        if not data.get("ok"):
+            logging.error(f"Telegram API error editing text for {message_id}: {data}")
+            return False
+        return True
+    except Exception as e:
+        logging.error(f"Failed to edit text for {message_id} in {chat_id}: {e}")
+        return False

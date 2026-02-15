@@ -34,6 +34,7 @@ from bot.telegram_api import (
     send_video as send_video_api,
     delete_message as delete_message_api,
     edit_message_reply_markup as edit_message_reply_markup_api,
+    edit_message_text as edit_message_text_api,
 )
 
 # -------------------------------------------------
@@ -203,6 +204,10 @@ def delete_message(chat_id, message_id):
 
 def edit_message_reply_markup(chat_id, message_id, reply_markup):
     return edit_message_reply_markup_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, message_id, reply_markup)
+
+
+def edit_message_text(chat_id, message_id, text, reply_markup=None, parse_mode=None):
+    return edit_message_text_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, message_id, text, reply_markup, parse_mode)
 
 def set_admin_user_action(tg_id, action, user_id, source_message_id=None):
     admin_user_actions[tg_id] = {
@@ -1250,12 +1255,16 @@ def build_library_access_menu(user_id):
 
 def show_library_access_menu(chat_id, user_id, source_message_id=None):
     text, keyboard = build_library_access_menu(user_id)
+    reply_markup = json.dumps({"inline_keyboard": keyboard}) if keyboard else None
+
     if source_message_id:
-        delete_message(chat_id, source_message_id)
+        if edit_message_text(chat_id, source_message_id, text, reply_markup=reply_markup):
+            return
+
     if keyboard is None:
         send_message(chat_id, text)
         return
-    send_message(chat_id, text, reply_markup=json.dumps({"inline_keyboard": keyboard}))
+    send_message(chat_id, text, reply_markup=reply_markup)
 
 
 def apply_library_mode(user_id, mode):
@@ -2115,8 +2124,6 @@ def handle_update(update):
                 if not user:
                     send_message(chat_id, "❌ User not found.")
                     return
-                delete_message(chat_id, callback["message"]["message_id"])
-
                 keyboard = [
                     [{"text": "ℹ️ Sub Info", "callback_data": f"user_action:{user_id}:subinfo"}],
                     [{"text": "➕ Extend Sub", "callback_data": f"user_action:{user_id}:subextend"}],
@@ -2148,22 +2155,17 @@ def handle_update(update):
                     send_message(chat_id, "❌ User not found.")
                     return
 
-                delete_message(chat_id, callback["message"]["message_id"])
-
                 username_value = user.get("username", user_id)
 
                 if action == "subinfo":
-                    delete_message(chat_id, callback["message"]["message_id"])
                     handle_subinfo(chat_id, tg_id, username_value)
                     return
 
                 if action == "subend":
-                    delete_message(chat_id, callback["message"]["message_id"])
                     handle_subend(chat_id, tg_id, username_value)
                     return
 
                 if action == "stats":
-                    delete_message(chat_id, callback["message"]["message_id"])
                     stats_text = get_watch_stats(user_id)
                     send_message(chat_id, f"📊 Watch Stats for {username_value}\n\n{stats_text}")
                     return
@@ -2171,7 +2173,6 @@ def handle_update(update):
                 if action == "upgrade":
                     success, result = handle_admin_upgrade(user_id, user, tg_id)
                     if success:
-                        delete_message(chat_id, callback["message"]["message_id"])
                         send_message(chat_id, f"✅ User `{username_value}` upgraded to {result}.", parse_mode="Markdown")
                         if user.get("telegram_id"):
                             send_message(user["telegram_id"], f"✅ Your role has been upgraded to {result}.")
@@ -2203,7 +2204,6 @@ def handle_update(update):
                     return
 
                 if action == "delete":
-                    delete_message(chat_id, callback["message"]["message_id"])
                     if handle_admin_delete(user_id, user, tg_id):
                         send_message(chat_id, f"✅ User `{username_value}` deleted.", parse_mode="Markdown")
                     else:
@@ -2964,7 +2964,6 @@ def handle_update(update):
                 if not user_id:
                     send_message(chat_id, f"❌ User '{username_value}' not found.")
                     return
-                delete_message(chat_id, message.get("message_id"))
                 admin_user_actions.pop(tg_id, None)
                 # Reuse user action menu
                 keyboard = [
