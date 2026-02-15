@@ -1333,6 +1333,34 @@ def toggle_library_access(user_id, library_index):
     return jellyfin_set_user_policy(user_id, policy)
 
 
+def build_user_action_keyboard(user_id, user):
+    """Build user action buttons based on role/subscription applicability/link state."""
+    keyboard = [
+        [{"text": "ℹ️ Sub Info", "callback_data": f"user_action:{user_id}:subinfo"}],
+        [{"text": "📊 Stats", "callback_data": f"user_action:{user_id}:stats"}],
+    ]
+
+    role = user.get("role", ROLE_REGULAR)
+    if role == ROLE_REGULAR:
+        keyboard.append([{"text": "➕ Extend Sub", "callback_data": f"user_action:{user_id}:subextend"}])
+        keyboard.append([{"text": "⛔ End Sub", "callback_data": f"user_action:{user_id}:subend"}])
+
+    if role != ROLE_ADMIN:
+        keyboard.append([{"text": "⬆️ Upgrade", "callback_data": f"user_action:{user_id}:upgrade"}])
+
+    if role != ROLE_REGULAR:
+        keyboard.append([{"text": "⬇️ Downgrade", "callback_data": f"user_action:{user_id}:downgrade"}])
+
+    if user.get("telegram_id"):
+        keyboard.append([{"text": "🔓 Unlink TG", "callback_data": f"user_action:{user_id}:unlink"}])
+    else:
+        keyboard.append([{"text": "🔗 Link TG", "callback_data": f"user_action:{user_id}:link"}])
+
+    keyboard.append([{"text": "📚 Libraries", "callback_data": f"user_action:{user_id}:libraries"}])
+    keyboard.append([{"text": "🗑️ Delete User", "callback_data": f"user_action:{user_id}:delete"}])
+    return keyboard
+
+
 def handle_users(chat_id, tg_id):
     """Handle /users command (admin only)"""
     if str(tg_id) not in admins:
@@ -2132,18 +2160,7 @@ def handle_update(update):
                 if not user:
                     send_message(chat_id, "❌ User not found.")
                     return
-                keyboard = [
-                    [{"text": "ℹ️ Sub Info", "callback_data": f"user_action:{user_id}:subinfo"}],
-                    [{"text": "➕ Extend Sub", "callback_data": f"user_action:{user_id}:subextend"}],
-                    [{"text": "⛔ End Sub", "callback_data": f"user_action:{user_id}:subend"}],
-                    [{"text": "📊 Stats", "callback_data": f"user_action:{user_id}:stats"}],
-                    [{"text": "⬆️ Upgrade", "callback_data": f"user_action:{user_id}:upgrade"}],
-                    [{"text": "⬇️ Downgrade", "callback_data": f"user_action:{user_id}:downgrade"}],
-                    [{"text": "🔗 Link TG", "callback_data": f"user_action:{user_id}:link"}],
-                    [{"text": "🔓 Unlink TG", "callback_data": f"user_action:{user_id}:unlink"}],
-                    [{"text": "📚 Libraries", "callback_data": f"user_action:{user_id}:libraries"}],
-                    [{"text": "🗑️ Delete User", "callback_data": f"user_action:{user_id}:delete"}],
-                ]
+                keyboard = build_user_action_keyboard(user_id, user)
 
                 send_message(
                     chat_id,
@@ -3031,18 +3048,7 @@ def handle_update(update):
                     return
                 admin_user_actions.pop(tg_id, None)
                 # Reuse user action menu
-                keyboard = [
-                    [{"text": "ℹ️ Sub Info", "callback_data": f"user_action:{user_id}:subinfo"}],
-                    [{"text": "➕ Extend Sub", "callback_data": f"user_action:{user_id}:subextend"}],
-                    [{"text": "⛔ End Sub", "callback_data": f"user_action:{user_id}:subend"}],
-                    [{"text": "📊 Stats", "callback_data": f"user_action:{user_id}:stats"}],
-                    [{"text": "⬆️ Upgrade", "callback_data": f"user_action:{user_id}:upgrade"}],
-                    [{"text": "⬇️ Downgrade", "callback_data": f"user_action:{user_id}:downgrade"}],
-                    [{"text": "🔗 Link TG", "callback_data": f"user_action:{user_id}:link"}],
-                    [{"text": "🔓 Unlink TG", "callback_data": f"user_action:{user_id}:unlink"}],
-                    [{"text": "📚 Libraries", "callback_data": f"user_action:{user_id}:libraries"}],
-                    [{"text": "🗑️ Delete User", "callback_data": f"user_action:{user_id}:delete"}],
-                ]
+                keyboard = build_user_action_keyboard(user_id, user)
                 send_message(
                     chat_id,
                     f"Manage user: {user.get('username')}\nRole: {user.get('role', ROLE_REGULAR)}",
