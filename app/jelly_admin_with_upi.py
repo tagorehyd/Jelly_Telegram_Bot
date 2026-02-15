@@ -87,6 +87,10 @@ username_to_uid = {}  # Fast username lookup: {username.lower(): jellyfin_user_i
 admin_request_messages = {}
 admin_user_actions = {}
 admin_user_flows = {}
+chat_flow_messages = {}
+chat_start_messages = {}
+
+CLEAN_BUTTON = {"text": "🧹 Clean", "callback_data": "clean"}
 
 # -------------------------------------------------
 # API WRAPPERS
@@ -190,15 +194,32 @@ def get_watch_stats(user_id=None):
 
 
 def send_message(chat_id, text, reply_markup=None, parse_mode=None):
-    return send_message_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, text, reply_markup, parse_mode)
+    normalized_markup = with_clean_button(reply_markup)
+    message_id = send_message_api(
+        HTTP_SESSION,
+        HTTP_TIMEOUT,
+        TELEGRAM_API,
+        chat_id,
+        text,
+        normalized_markup,
+        parse_mode,
+    )
+    track_chat_flow_message(chat_id, message_id)
+    return message_id
 
 
 def send_photo(chat_id, photo, caption=None, reply_markup=None):
-    return send_photo_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, photo, caption, reply_markup)
+    normalized_markup = with_clean_button(reply_markup)
+    message_id = send_photo_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, photo, caption, normalized_markup)
+    track_chat_flow_message(chat_id, message_id)
+    return message_id
 
 
 def send_video(chat_id, video, caption=None, reply_markup=None):
-    return send_video_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, video, caption, reply_markup)
+    normalized_markup = with_clean_button(reply_markup)
+    message_id = send_video_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, video, caption, normalized_markup)
+    track_chat_flow_message(chat_id, message_id)
+    return message_id
 
 
 def delete_message(chat_id, message_id):
@@ -206,15 +227,115 @@ def delete_message(chat_id, message_id):
 
 
 def edit_message_reply_markup(chat_id, message_id, reply_markup):
-    return edit_message_reply_markup_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, message_id, reply_markup)
+    normalized_markup = with_clean_button(reply_markup)
+    return edit_message_reply_markup_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, message_id, normalized_markup)
 
 
 def edit_message_text(chat_id, message_id, text, reply_markup=None, parse_mode=None):
-    return edit_message_text_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, message_id, text, reply_markup, parse_mode)
+    normalized_markup = with_clean_button(reply_markup)
+    return edit_message_text_api(
+        HTTP_SESSION,
+        HTTP_TIMEOUT,
+        TELEGRAM_API,
+        chat_id,
+        message_id,
+        text,
+        normalized_markup,
+        parse_mode,
+    )
 
 
 def answer_callback_query(callback_query_id, text=None, show_alert=False):
     return answer_callback_query_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, callback_query_id, text, show_alert)
+
+
+def with_clean_button(reply_markup):
+    if not reply_markup:
+        return json.dumps({"inline_keyboard": [[dict(CLEAN_BUTTON)]]})
+
+    markup = reply_markup
+    if isinstance(reply_markup, str):
+        try:
+            markup = json.loads(reply_markup)
+        except json.JSONDecodeError:
+            logging.warning("Invalid reply_markup JSON, leaving markup unchanged")
+            return reply_markup
+
+    if not isinstance(markup, dict):
+        return reply_markup
+
+    inline_keyboard = markup.get("inline_keyboard")
+    if not isinstance(inline_keyboard, list):
+        inline_keyboard = []
+
+    cleaned_keyboard = []
+    for row in inline_keyboard:
+        if not isinstance(row, list):
+            continue
+        cleaned_row = []
+        for button in row:
+            if not isinstance(button, dict):
+                continue
+            callback_data = button.get("callback_data")
+            if callback_data == "clean" or callback_data == "user_action:clean":
+                continue
+            if isinstance(callback_data, str) and callback_data.endswith(":clean"):
+                continue
+            cleaned_row.append(button)
+        if cleaned_row:
+            cleaned_keyboard.append(cleaned_row)
+
+    cleaned_keyboard.append([dict(CLEAN_BUTTON)])
+    markup["inline_keyboard"] = cleaned_keyboard
+    return json.dumps(markup)
+
+
+def track_chat_flow_message(chat_id, message_id):
+    if not message_id:
+        return
+    if chat_start_messages.get(chat_id) == message_id:
+        return
+    history = chat_flow_messages.setdefault(chat_id, [])
+    if message_id not in history:
+        history.append(message_id)
+
+
+def reset_chat_flow(chat_id):
+    chat_flow_messages[chat_id] = []
+    chat_start_messages.pop(chat_id, None)
+
+
+def send_start_message(chat_id, text, parse_mode=None):
+    reset_chat_flow(chat_id)
+    start_markup = json.dumps({"inline_keyboard": [[dict(CLEAN_BUTTON)]]})
+    message_id = send_message_api(
+        HTTP_SESSION,
+        HTTP_TIMEOUT,
+        TELEGRAM_API,
+        chat_id,
+        text,
+        start_markup,
+        parse_mode,
+    )
+    if message_id:
+        chat_start_messages[chat_id] = message_id
+    return message_id
+
+
+def clear_chat_flow(chat_id, current_message_id=None):
+    message_ids = list(chat_flow_messages.pop(chat_id, []))
+    if current_message_id:
+        message_ids.append(current_message_id)
+
+    start_message_id = chat_start_messages.get(chat_id)
+    seen = set()
+    for message_id in message_ids:
+        if not message_id or message_id in seen:
+            continue
+        seen.add(message_id)
+        if start_message_id and message_id == start_message_id:
+            continue
+        delete_message(chat_id, message_id)
 
 
 def set_admin_user_action(tg_id, action, user_id, source_message_id=None, chat_id=None):
@@ -929,7 +1050,7 @@ def handle_start(chat_id, tg_id, first_name):
         
         # Role-based greeting
         if is_admin:
-            send_message(chat_id,
+            send_start_message(chat_id,
                 f"👑 Welcome back, Admin {first_name}!\n\n"
                 f"👤 Username: {username}\n\n"
                 "🔧 Admin Commands:\n"
@@ -939,13 +1060,14 @@ def handle_start(chat_id, tg_id, first_name):
                 "/stats - View system statistics\n"
                 "/broadcast - Send message to all users\n"
                 "/message <username> - Send message to specific user\n"
-                "/downgrade <username> <role> - Downgrade user role\n\n"
+                "/upgrade - Upgrade a user (button picker)\n"
+                "/downgrade - Downgrade a user (button picker)\n\n"
                 "🔐 Personal:\n"
                 "/resetpw - Reset your password"
             )
             return
         elif role == ROLE_PRIVILEGED:
-            send_message(chat_id,
+            send_start_message(chat_id,
                 f"⭐ Welcome back, {first_name}!\n\n"
                 f"👤 Username: {username}\n"
                 f"🎯 Status: Privileged User (No subscription required)\n\n"
@@ -961,7 +1083,7 @@ def handle_start(chat_id, tg_id, first_name):
             
             if active and expires_at:  # Check expires_at is not None
                 expiry_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d %H:%M")
-                send_message(chat_id,
+                send_start_message(chat_id,
                     f"👋 Welcome back, {first_name}!\n\n"
                     f"👤 Username: {username}\n"
                     f"✅ Subscription: Active\n"
@@ -975,7 +1097,7 @@ def handle_start(chat_id, tg_id, first_name):
                 )
             elif active and not expires_at:
                 # Edge case: user has permanent access but role not set correctly
-                send_message(chat_id,
+                send_start_message(chat_id,
                     f"👋 Welcome back, {first_name}!\n\n"
                     f"👤 Username: {username}\n"
                     f"✅ Status: Active (Permanent Access)\n\n"
@@ -986,7 +1108,7 @@ def handle_start(chat_id, tg_id, first_name):
                     "/upgrade - Request role upgrade"
                 )
             else:
-                send_message(chat_id,
+                send_start_message(chat_id,
                     f"👋 Welcome back, {first_name}!\n\n"
                     f"👤 Username: {username}\n"
                     f"⚠️ Subscription: Expired\n\n"
@@ -1002,7 +1124,7 @@ def handle_start(chat_id, tg_id, first_name):
         unlinked_users = {uid: u for uid, u in users.items() if not u.get("telegram_id")}
         
         if unlinked_users:
-            send_message(chat_id,
+            send_start_message(chat_id,
                 f"👋 Welcome, {first_name}!\n\n"
                 "Choose an option:\n\n"
                 "1️⃣ Link to existing Jellyfin account:\n"
@@ -1012,7 +1134,7 @@ def handle_start(chat_id, tg_id, first_name):
                 "💡 If you already have a Jellyfin account, use /linkme to connect it to your Telegram."
             )
         else:
-            send_message(chat_id,
+            send_start_message(chat_id,
                 f"👋 Welcome, {first_name}!\n\n"
                 "To get started, please register:\n"
                 "/register"
@@ -1390,7 +1512,6 @@ def build_user_action_keyboard(user_id, user):
         keyboard.append([{"text": "🔗 Link TG", "callback_data": f"user_action:{user_id}:link"}])
 
     keyboard.append([{"text": "📚 Libraries", "callback_data": f"user_action:{user_id}:libraries"}])
-    keyboard.append([{"text": "🧹 Clean Flow", "callback_data": f"user_action:{user_id}:clean"}])
     keyboard.append([{"text": "🗑️ Delete User", "callback_data": f"user_action:{user_id}:delete"}])
     return keyboard
 
@@ -1797,8 +1918,124 @@ def handle_unlinkme(chat_id, tg_id):
     logging.info(f"Unlink request from user {tg_id} ({user['username']})")
 
 
+def build_admin_role_target_keyboard(action):
+    """Build inline keyboard for selecting a target account for role change."""
+    targets = []
+    for user_id, user in users.items():
+        role = user.get("role", ROLE_REGULAR)
+        username = user.get("username", user_id)
+
+        if action == "upgrade" and role == ROLE_ADMIN:
+            continue
+
+        icon = "👑" if role == ROLE_ADMIN else ("⭐" if role == ROLE_PRIVILEGED else "👤")
+        callback_prefix = "admin_upgrade_select" if action == "upgrade" else "admin_downgrade_select"
+        targets.append((username.lower(), [{
+            "text": f"{icon} {username}",
+            "callback_data": f"{callback_prefix}:{user_id}",
+        }]))
+
+    if not targets:
+        return None
+
+    targets.sort(key=lambda item: item[0])
+    return [item[1] for item in targets]
+
+
+def send_admin_role_target_picker(chat_id, action):
+    keyboard = build_admin_role_target_keyboard(action)
+    if not keyboard:
+        send_message(chat_id, "ℹ️ No eligible users found.")
+        return
+
+    title = "Select account to upgrade:" if action == "upgrade" else "Select account to downgrade:"
+    send_message(chat_id, title, reply_markup=json.dumps({"inline_keyboard": keyboard}))
+
+
+def handle_admin_downgrade_target(chat_id, tg_id, user_id):
+    """Downgrade privileged users directly to regular; otherwise ask target role."""
+    user = users.get(user_id)
+    if not user:
+        send_message(chat_id, "❌ User not found.")
+        return
+
+    current_role = user.get("role", ROLE_REGULAR)
+    if current_role == ROLE_PRIVILEGED:
+        apply_admin_downgrade(chat_id, tg_id, user_id, ROLE_REGULAR)
+        return
+
+    send_admin_downgrade_role_picker(chat_id, user_id)
+
+
+def send_admin_downgrade_role_picker(chat_id, user_id):
+    user = users.get(user_id)
+    if not user:
+        send_message(chat_id, "❌ User not found.")
+        return
+
+    username = user.get("username", user_id)
+    keyboard = [
+        [{"text": "👤 Regular", "callback_data": f"admin_downgrade_role:{user_id}:{ROLE_REGULAR}"}],
+        [{"text": "⭐ Privileged", "callback_data": f"admin_downgrade_role:{user_id}:{ROLE_PRIVILEGED}"}],
+    ]
+    send_message(
+        chat_id,
+        f"Select new role for `{username}`:",
+        reply_markup=json.dumps({"inline_keyboard": keyboard}),
+        parse_mode="Markdown",
+    )
+
+
+def apply_admin_downgrade(chat_id, tg_id, target_uid, target_role):
+    user = users.get(target_uid)
+    if not user:
+        send_message(chat_id, "❌ User not found.")
+        return False
+
+    username = user.get("username", target_uid)
+    if target_role not in [ROLE_REGULAR, ROLE_PRIVILEGED]:
+        send_message(chat_id, "❌ Invalid role. Use: regular or privileged.")
+        return False
+
+    if user.get("role") == target_role:
+        send_message(chat_id, f"ℹ️ User '{username}' is already {target_role}.")
+        return False
+
+    users[target_uid]["role"] = target_role
+    users[target_uid]["is_admin"] = target_role == ROLE_ADMIN
+    save_json(USERS_FILE, users)
+
+    if target_role == ROLE_REGULAR:
+        enforce_regular_user_access(target_uid, reason="admin_downgrade")
+    else:
+        ensure_upgraded_user_enabled(target_uid, reason="admin_downgrade_to_privileged")
+
+    send_message(chat_id, f"✅ User `{username}` downgraded to {target_role}.", parse_mode="Markdown")
+    approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
+    notify_admins_notice_except(
+        tg_id,
+        f"⬇️ Role downgraded by {approver_label}\n\n"
+        f"User: `{username}`\n"
+        f"Role: {target_role}",
+        parse_mode="Markdown",
+    )
+
+    telegram_id = user.get("telegram_id")
+    if telegram_id:
+        send_message(
+            telegram_id,
+            f"⚠️ Your role has been changed by an admin.\n\n"
+            f"New role: {target_role}",
+        )
+    return True
+
+
 def handle_upgrade(chat_id, tg_id):
-    """Handle /upgrade command - request role upgrade"""
+    """Handle /upgrade command."""
+    if str(tg_id) in admins:
+        send_admin_role_target_picker(chat_id, "upgrade")
+        return
+
     user_id, user = get_user_by_telegram_id(tg_id)
     if not user:
         send_message(chat_id, "❌ You are not registered.")
@@ -1820,7 +2057,7 @@ def handle_upgrade(chat_id, tg_id):
         "requested_at": int(time.time()),
         "type": "role_upgrade",
         "current_role": role,
-        "target_role": target_role
+        "target_role": target_role,
     }
     save_json(PENDING_FILE, pending)
 
@@ -1829,7 +2066,7 @@ def handle_upgrade(chat_id, tg_id):
         f"⬆️ Upgrade request submitted!\n\n"
         f"Current role: {role}\n"
         f"Requested role: {target_role}\n\n"
-        f"⏳ Please wait for an admin to approve your request."
+        f"⏳ Please wait for an admin to approve your request.",
     )
 
     request_key = f"role_upgrade:{tg_id}"
@@ -1842,10 +2079,35 @@ def handle_upgrade(chat_id, tg_id):
         reply_markup=json.dumps({
             "inline_keyboard": [[
                 {"text": "✅ Approve Upgrade", "callback_data": f"role_upgrade:{tg_id}"},
-                {"text": "❌ Reject Upgrade", "callback_data": f"role_upgrade_reject:{tg_id}"}
+                {"text": "❌ Reject Upgrade", "callback_data": f"role_upgrade_reject:{tg_id}"},
             ]]
-        })
+        }),
     )
+
+
+def handle_admin_downgrade(chat_id, tg_id, args):
+    """Handle /downgrade command (admin only)."""
+    if str(tg_id) not in admins:
+        send_message(chat_id, "❌ Admin access required.")
+        return
+
+    if not args:
+        send_admin_role_target_picker(chat_id, "downgrade")
+        return
+
+    username = args[0]
+    target_uid, user = get_user_by_username(username)
+    if not target_uid:
+        send_message(chat_id, f"❌ User '{username}' not found.")
+        return
+
+    if len(args) == 1:
+        handle_admin_downgrade_target(chat_id, tg_id, target_uid)
+        return
+
+    target_role = args[1].lower()
+    apply_admin_downgrade(chat_id, tg_id, target_uid, target_role)
+
 
 def handle_admin_link(chat_id, tg_id, args):
     """Handle /link command (admin only) - admin links user to telegram"""
@@ -1967,59 +2229,6 @@ def handle_admin_unlink(chat_id, tg_id, args):
     logging.info(f"Admin {tg_id} unlinked user {username_to_unlink} from Telegram {old_telegram_id}")
 
 
-def handle_admin_downgrade(chat_id, tg_id, args):
-    """Handle /downgrade command (admin only) - admin downgrades user role"""
-    if str(tg_id) not in admins:
-        send_message(chat_id, "❌ Admin access required.")
-        return
-
-    if len(args) < 2:
-        send_message(chat_id, "❌ Usage: /downgrade <username> <role>\n\nRoles: regular, privileged")
-        return
-
-    username = args[0]
-    target_role = args[1].lower()
-    if target_role not in [ROLE_REGULAR, ROLE_PRIVILEGED]:
-        send_message(chat_id, "❌ Invalid role. Use: regular or privileged.")
-        return
-
-    target_uid, user = get_user_by_username(username)
-    if not target_uid:
-        send_message(chat_id, f"❌ User '{username}' not found.")
-        return
-
-    if user.get("role") == target_role:
-        send_message(chat_id, f"ℹ️ User '{username}' is already {target_role}.")
-        return
-
-    users[target_uid]["role"] = target_role
-    users[target_uid]["is_admin"] = target_role == ROLE_ADMIN
-    save_json(USERS_FILE, users)
-
-    if target_role == ROLE_REGULAR:
-        enforce_regular_user_access(target_uid, reason="admin_downgrade")
-    else:
-        ensure_upgraded_user_enabled(target_uid, reason="admin_downgrade_to_privileged")
-
-    send_message(chat_id, f"✅ User `{username}` downgraded to {target_role}.", parse_mode="Markdown")
-    approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
-    notify_admins_notice_except(
-        tg_id,
-        f"⬇️ Role downgraded by {approver_label}\n\n"
-        f"User: `{username}`\n"
-        f"Role: {target_role}",
-        parse_mode="Markdown"
-    )
-
-    telegram_id = user.get("telegram_id")
-    if telegram_id:
-        send_message(
-            telegram_id,
-            f"⚠️ Your role has been changed by an admin.\n\n"
-            f"New role: {target_role}"
-        )
-
-
 def handle_admin_upgrade(user_id, user, tg_id):
     current_role = user.get("role", ROLE_REGULAR)
     if current_role == ROLE_ADMIN:
@@ -2096,6 +2305,45 @@ def handle_update(update):
             # Log callback query
             activity_logger.info(f"CALLBACK | User: {first_name} (@{username}) | TG_ID: {tg_id} | Data: {data}")
             logging.debug(f"Callback from user {tg_id} (@{username}): {data}")
+
+            if data == "clean":
+                clear_chat_flow(chat_id, current_message_id=callback["message"]["message_id"])
+                return
+
+            if data.startswith("admin_upgrade_select:"):
+                if not is_admin:
+                    send_message(chat_id, "❌ Admin access required.")
+                    return
+                user_id = data.split(":", 1)[1]
+                user = users.get(user_id)
+                if not user:
+                    send_message(chat_id, "❌ User not found.")
+                    return
+                username_value = user.get("username", user_id)
+                success, result = handle_admin_upgrade(user_id, user, tg_id)
+                if success:
+                    send_message(chat_id, f"✅ User `{username_value}` upgraded to {result}.", parse_mode="Markdown")
+                    if user.get("telegram_id"):
+                        send_message(user["telegram_id"], f"✅ Your role has been upgraded to {result}.")
+                else:
+                    send_message(chat_id, f"ℹ️ {result}")
+                return
+
+            if data.startswith("admin_downgrade_select:"):
+                if not is_admin:
+                    send_message(chat_id, "❌ Admin access required.")
+                    return
+                user_id = data.split(":", 1)[1]
+                handle_admin_downgrade_target(chat_id, tg_id, user_id)
+                return
+
+            if data.startswith("admin_downgrade_role:"):
+                if not is_admin:
+                    send_message(chat_id, "❌ Admin access required.")
+                    return
+                _, user_id, target_role = data.split(":", 2)
+                apply_admin_downgrade(chat_id, tg_id, user_id, target_role)
+                return
             
             # Plan selection
             if data.startswith("plan:"):
@@ -2287,8 +2535,7 @@ def handle_update(update):
                     return
 
                 if action == "downgrade":
-                    set_admin_user_action(tg_id, "downgrade", user_id, callback["message"]["message_id"], chat_id=chat_id)
-                    send_message(chat_id, "Enter the new role: regular or privileged")
+                    handle_admin_downgrade_target(chat_id, tg_id, user_id)
                     return
 
                 if action == "subextend":
@@ -2321,10 +2568,6 @@ def handle_update(update):
 
                 if action == "libraries":
                     show_library_access_menu(chat_id, user_id)
-                    return
-
-                if action == "clean":
-                    clear_admin_user_flow(chat_id, tg_id, current_message_id=callback["message"]["message_id"])
                     return
 
                 if action == "delete":
