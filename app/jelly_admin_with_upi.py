@@ -703,6 +703,32 @@ def check_subscription_status(user_id):
         return True, sub["expires_at"]
     return False, None
 
+
+def enforce_regular_user_access(user_id, reason="subscription_check"):
+    """Disable regular users who don't have an active subscription."""
+    user = users.get(user_id)
+    if not user:
+        return False
+
+    role = user.get("role", ROLE_REGULAR)
+    if role != ROLE_REGULAR:
+        return False
+
+    has_access, _ = check_subscription_status(user_id)
+    if has_access:
+        return False
+
+    username = user.get("username")
+    if not username:
+        return False
+
+    success = jellyfin_disable_user(username)
+    if validate_jellyfin_operation(f"disable user {username}", success, critical=True):
+        logging.info(f"Disabled regular user {user_id} ({username}) without active subscription ({reason})")
+        return True
+
+    return False
+
 def activate_subscription(user_id, duration_days):
     """Activate or extend subscription for a user - each day is exactly 24 hours (86400 seconds)"""
     # Validate inputs
@@ -756,7 +782,7 @@ def subscription_monitor_loop():
             current_time = time.time()
             expired_users = []
             
-            for user_id, sub in subscriptions.items():
+            for user_id, sub in list(subscriptions.items()):
                 if sub["expires_at"] <= current_time:
                     expired_users.append(user_id)
             
@@ -789,6 +815,9 @@ def subscription_monitor_loop():
                 
                 # Remove expired subscription only if disable succeeded
                 subscriptions.pop(user_id, None)
+
+            for user_id in list(users.keys()):
+                enforce_regular_user_access(user_id, reason="monitor_loop")
             
             if expired_users:
                 if not safe_file_save(SUBSCRIPTIONS_FILE, subscriptions, "subscriptions"):
@@ -1746,6 +1775,9 @@ def handle_admin_downgrade(chat_id, tg_id, args):
     users[target_uid]["role"] = target_role
     users[target_uid]["is_admin"] = target_role == ROLE_ADMIN
     save_json(USERS_FILE, users)
+
+    if target_role == ROLE_REGULAR:
+        enforce_regular_user_access(target_uid, reason="admin_downgrade")
 
     send_message(chat_id, f"✅ User `{username}` downgraded to {target_role}.", parse_mode="Markdown")
     approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
