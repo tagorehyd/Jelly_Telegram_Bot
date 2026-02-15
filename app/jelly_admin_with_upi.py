@@ -1289,8 +1289,8 @@ def handle_subinfo(chat_id, tg_id, username):
     
     role = user.get("role", ROLE_REGULAR)
     
-    msg = f"📊 **Subscription Info: {username}**\n\n"
-    msg += f"👤 Username: `{username}`\n"
+    msg = f"📊 Subscription Info: {username}\n\n"
+    msg += f"👤 Username: {username}\n"
     msg += f"🎯 Role: {role.title()}\n"
     
     if role == ROLE_ADMIN:
@@ -1311,11 +1311,11 @@ def handle_subinfo(chat_id, tg_id, username):
         else:
             msg += f"❌ Status: Expired\n"
     
-    msg += f"\n💡 **Management Commands:**\n"
-    msg += f"`/subextend {username} <days>` - Extend subscription\n"
-    msg += f"`/subend {username}` - End subscription immediately"
+    msg += f"\n💡 Management Commands:\n"
+    msg += f"/subextend {username} <days> - Extend subscription\n"
+    msg += f"/subend {username} - End subscription immediately"
     
-    send_message(chat_id, msg, parse_mode="Markdown")
+    send_message(chat_id, msg)
 
 def handle_subextend(chat_id, tg_id, args):
     """Handle /subextend command - extend user's subscription (admin only)"""
