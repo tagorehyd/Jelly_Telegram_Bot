@@ -1060,7 +1060,8 @@ def handle_start(chat_id, tg_id, first_name):
                 "/stats - View system statistics\n"
                 "/broadcast - Send message to all users\n"
                 "/message <username> - Send message to specific user\n"
-                "/downgrade <username> <role> - Downgrade user role\n\n"
+                "/upgrade - Upgrade a user (button picker)\n"
+                "/downgrade - Downgrade a user (button picker)\n\n"
                 "🔐 Personal:\n"
                 "/resetpw - Reset your password"
             )
@@ -1917,8 +1918,109 @@ def handle_unlinkme(chat_id, tg_id):
     logging.info(f"Unlink request from user {tg_id} ({user['username']})")
 
 
+def build_admin_role_target_keyboard(action):
+    """Build inline keyboard for selecting a target account for role change."""
+    targets = []
+    for user_id, user in users.items():
+        role = user.get("role", ROLE_REGULAR)
+        username = user.get("username", user_id)
+
+        if action == "upgrade" and role == ROLE_ADMIN:
+            continue
+
+        icon = "👑" if role == ROLE_ADMIN else ("⭐" if role == ROLE_PRIVILEGED else "👤")
+        callback_prefix = "admin_upgrade_select" if action == "upgrade" else "admin_downgrade_select"
+        targets.append((username.lower(), [{
+            "text": f"{icon} {username}",
+            "callback_data": f"{callback_prefix}:{user_id}",
+        }]))
+
+    if not targets:
+        return None
+
+    targets.sort(key=lambda item: item[0])
+    return [item[1] for item in targets]
+
+
+def send_admin_role_target_picker(chat_id, action):
+    keyboard = build_admin_role_target_keyboard(action)
+    if not keyboard:
+        send_message(chat_id, "ℹ️ No eligible users found.")
+        return
+
+    title = "Select account to upgrade:" if action == "upgrade" else "Select account to downgrade:"
+    send_message(chat_id, title, reply_markup=json.dumps({"inline_keyboard": keyboard}))
+
+
+def send_admin_downgrade_role_picker(chat_id, user_id):
+    user = users.get(user_id)
+    if not user:
+        send_message(chat_id, "❌ User not found.")
+        return
+
+    username = user.get("username", user_id)
+    keyboard = [
+        [{"text": "👤 Regular", "callback_data": f"admin_downgrade_role:{user_id}:{ROLE_REGULAR}"}],
+        [{"text": "⭐ Privileged", "callback_data": f"admin_downgrade_role:{user_id}:{ROLE_PRIVILEGED}"}],
+    ]
+    send_message(
+        chat_id,
+        f"Select new role for `{username}`:",
+        reply_markup=json.dumps({"inline_keyboard": keyboard}),
+        parse_mode="Markdown",
+    )
+
+
+def apply_admin_downgrade(chat_id, tg_id, target_uid, target_role):
+    user = users.get(target_uid)
+    if not user:
+        send_message(chat_id, "❌ User not found.")
+        return False
+
+    username = user.get("username", target_uid)
+    if target_role not in [ROLE_REGULAR, ROLE_PRIVILEGED]:
+        send_message(chat_id, "❌ Invalid role. Use: regular or privileged.")
+        return False
+
+    if user.get("role") == target_role:
+        send_message(chat_id, f"ℹ️ User '{username}' is already {target_role}.")
+        return False
+
+    users[target_uid]["role"] = target_role
+    users[target_uid]["is_admin"] = target_role == ROLE_ADMIN
+    save_json(USERS_FILE, users)
+
+    if target_role == ROLE_REGULAR:
+        enforce_regular_user_access(target_uid, reason="admin_downgrade")
+    else:
+        ensure_upgraded_user_enabled(target_uid, reason="admin_downgrade_to_privileged")
+
+    send_message(chat_id, f"✅ User `{username}` downgraded to {target_role}.", parse_mode="Markdown")
+    approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
+    notify_admins_notice_except(
+        tg_id,
+        f"⬇️ Role downgraded by {approver_label}\n\n"
+        f"User: `{username}`\n"
+        f"Role: {target_role}",
+        parse_mode="Markdown",
+    )
+
+    telegram_id = user.get("telegram_id")
+    if telegram_id:
+        send_message(
+            telegram_id,
+            f"⚠️ Your role has been changed by an admin.\n\n"
+            f"New role: {target_role}",
+        )
+    return True
+
+
 def handle_upgrade(chat_id, tg_id):
-    """Handle /upgrade command - request role upgrade"""
+    """Handle /upgrade command."""
+    if str(tg_id) in admins:
+        send_admin_role_target_picker(chat_id, "upgrade")
+        return
+
     user_id, user = get_user_by_telegram_id(tg_id)
     if not user:
         send_message(chat_id, "❌ You are not registered.")
@@ -1940,7 +2042,7 @@ def handle_upgrade(chat_id, tg_id):
         "requested_at": int(time.time()),
         "type": "role_upgrade",
         "current_role": role,
-        "target_role": target_role
+        "target_role": target_role,
     }
     save_json(PENDING_FILE, pending)
 
@@ -1949,7 +2051,7 @@ def handle_upgrade(chat_id, tg_id):
         f"⬆️ Upgrade request submitted!\n\n"
         f"Current role: {role}\n"
         f"Requested role: {target_role}\n\n"
-        f"⏳ Please wait for an admin to approve your request."
+        f"⏳ Please wait for an admin to approve your request.",
     )
 
     request_key = f"role_upgrade:{tg_id}"
@@ -1962,10 +2064,35 @@ def handle_upgrade(chat_id, tg_id):
         reply_markup=json.dumps({
             "inline_keyboard": [[
                 {"text": "✅ Approve Upgrade", "callback_data": f"role_upgrade:{tg_id}"},
-                {"text": "❌ Reject Upgrade", "callback_data": f"role_upgrade_reject:{tg_id}"}
+                {"text": "❌ Reject Upgrade", "callback_data": f"role_upgrade_reject:{tg_id}"},
             ]]
-        })
+        }),
     )
+
+
+def handle_admin_downgrade(chat_id, tg_id, args):
+    """Handle /downgrade command (admin only)."""
+    if str(tg_id) not in admins:
+        send_message(chat_id, "❌ Admin access required.")
+        return
+
+    if not args:
+        send_admin_role_target_picker(chat_id, "downgrade")
+        return
+
+    username = args[0]
+    target_uid, user = get_user_by_username(username)
+    if not target_uid:
+        send_message(chat_id, f"❌ User '{username}' not found.")
+        return
+
+    if len(args) == 1:
+        send_admin_downgrade_role_picker(chat_id, target_uid)
+        return
+
+    target_role = args[1].lower()
+    apply_admin_downgrade(chat_id, tg_id, target_uid, target_role)
+
 
 def handle_admin_link(chat_id, tg_id, args):
     """Handle /link command (admin only) - admin links user to telegram"""
@@ -2087,59 +2214,6 @@ def handle_admin_unlink(chat_id, tg_id, args):
     logging.info(f"Admin {tg_id} unlinked user {username_to_unlink} from Telegram {old_telegram_id}")
 
 
-def handle_admin_downgrade(chat_id, tg_id, args):
-    """Handle /downgrade command (admin only) - admin downgrades user role"""
-    if str(tg_id) not in admins:
-        send_message(chat_id, "❌ Admin access required.")
-        return
-
-    if len(args) < 2:
-        send_message(chat_id, "❌ Usage: /downgrade <username> <role>\n\nRoles: regular, privileged")
-        return
-
-    username = args[0]
-    target_role = args[1].lower()
-    if target_role not in [ROLE_REGULAR, ROLE_PRIVILEGED]:
-        send_message(chat_id, "❌ Invalid role. Use: regular or privileged.")
-        return
-
-    target_uid, user = get_user_by_username(username)
-    if not target_uid:
-        send_message(chat_id, f"❌ User '{username}' not found.")
-        return
-
-    if user.get("role") == target_role:
-        send_message(chat_id, f"ℹ️ User '{username}' is already {target_role}.")
-        return
-
-    users[target_uid]["role"] = target_role
-    users[target_uid]["is_admin"] = target_role == ROLE_ADMIN
-    save_json(USERS_FILE, users)
-
-    if target_role == ROLE_REGULAR:
-        enforce_regular_user_access(target_uid, reason="admin_downgrade")
-    else:
-        ensure_upgraded_user_enabled(target_uid, reason="admin_downgrade_to_privileged")
-
-    send_message(chat_id, f"✅ User `{username}` downgraded to {target_role}.", parse_mode="Markdown")
-    approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
-    notify_admins_notice_except(
-        tg_id,
-        f"⬇️ Role downgraded by {approver_label}\n\n"
-        f"User: `{username}`\n"
-        f"Role: {target_role}",
-        parse_mode="Markdown"
-    )
-
-    telegram_id = user.get("telegram_id")
-    if telegram_id:
-        send_message(
-            telegram_id,
-            f"⚠️ Your role has been changed by an admin.\n\n"
-            f"New role: {target_role}"
-        )
-
-
 def handle_admin_upgrade(user_id, user, tg_id):
     current_role = user.get("role", ROLE_REGULAR)
     if current_role == ROLE_ADMIN:
@@ -2220,6 +2294,41 @@ def handle_update(update):
             if data == "clean":
                 clear_chat_flow(chat_id, current_message_id=callback["message"]["message_id"])
                 handle_start(chat_id, tg_id, first_name)
+                return
+
+            if data.startswith("admin_upgrade_select:"):
+                if not is_admin:
+                    send_message(chat_id, "❌ Admin access required.")
+                    return
+                user_id = data.split(":", 1)[1]
+                user = users.get(user_id)
+                if not user:
+                    send_message(chat_id, "❌ User not found.")
+                    return
+                username_value = user.get("username", user_id)
+                success, result = handle_admin_upgrade(user_id, user, tg_id)
+                if success:
+                    send_message(chat_id, f"✅ User `{username_value}` upgraded to {result}.", parse_mode="Markdown")
+                    if user.get("telegram_id"):
+                        send_message(user["telegram_id"], f"✅ Your role has been upgraded to {result}.")
+                else:
+                    send_message(chat_id, f"ℹ️ {result}")
+                return
+
+            if data.startswith("admin_downgrade_select:"):
+                if not is_admin:
+                    send_message(chat_id, "❌ Admin access required.")
+                    return
+                user_id = data.split(":", 1)[1]
+                send_admin_downgrade_role_picker(chat_id, user_id)
+                return
+
+            if data.startswith("admin_downgrade_role:"):
+                if not is_admin:
+                    send_message(chat_id, "❌ Admin access required.")
+                    return
+                _, user_id, target_role = data.split(":", 2)
+                apply_admin_downgrade(chat_id, tg_id, user_id, target_role)
                 return
             
             # Plan selection
@@ -2412,8 +2521,7 @@ def handle_update(update):
                     return
 
                 if action == "downgrade":
-                    set_admin_user_action(tg_id, "downgrade", user_id, callback["message"]["message_id"], chat_id=chat_id)
-                    send_message(chat_id, "Enter the new role: regular or privileged")
+                    send_admin_downgrade_role_picker(chat_id, user_id)
                     return
 
                 if action == "subextend":
