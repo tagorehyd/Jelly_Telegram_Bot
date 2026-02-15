@@ -201,3 +201,62 @@ def get_user_played_runtime(base_url, api_key, session, timeout, user_id, limit=
     except Exception as e:
         logging.error(f"Error fetching runtime for user {user_id}: {e}")
         return 0
+
+
+def get_user_policy(base_url, api_key, session, timeout, user_id):
+    try:
+        resp = session.get(
+            f"{base_url}/Users/{user_id}",
+            headers={"X-Emby-Token": api_key},
+            timeout=timeout
+        )
+        if resp.status_code != 200:
+            logging.error(f"Failed to fetch user policy for '{user_id}': {resp.status_code} - {resp.text}")
+            return None
+        return resp.json().get("Policy", {})
+    except Exception as e:
+        logging.error(f"Error fetching user policy for '{user_id}': {e}")
+        return None
+
+
+def set_user_policy(base_url, api_key, session, timeout, user_id, policy):
+    try:
+        resp = session.post(
+            f"{base_url}/Users/{user_id}/Policy",
+            headers={"X-Emby-Token": api_key, "Content-Type": "application/json"},
+            json=policy,
+            timeout=timeout
+        )
+        if resp.status_code in (200, 204):
+            return True
+        logging.error(f"Failed to set user policy for '{user_id}': {resp.status_code} - {resp.text}")
+        return False
+    except Exception as e:
+        logging.error(f"Error setting user policy for '{user_id}': {e}")
+        return False
+
+
+def get_library_folders(base_url, api_key, session, timeout):
+    try:
+        resp = session.get(
+            f"{base_url}/Library/VirtualFolders",
+            headers={"X-Emby-Token": api_key},
+            timeout=timeout
+        )
+        if resp.status_code != 200:
+            logging.error(f"Failed to fetch library folders: {resp.status_code} - {resp.text}")
+            return []
+
+        folders = []
+        for folder in resp.json():
+            folder_id = folder.get("ItemId") or folder.get("Id")
+            if not folder_id:
+                continue
+            folders.append({
+                "id": folder_id,
+                "name": folder.get("Name", "Unknown")
+            })
+        return folders
+    except Exception as e:
+        logging.error(f"Error fetching library folders: {e}")
+        return []
