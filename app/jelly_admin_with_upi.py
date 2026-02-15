@@ -87,6 +87,10 @@ username_to_uid = {}  # Fast username lookup: {username.lower(): jellyfin_user_i
 admin_request_messages = {}
 admin_user_actions = {}
 admin_user_flows = {}
+chat_flow_messages = {}
+chat_start_messages = {}
+
+CLEAN_BUTTON = {"text": "🧹 Clean", "callback_data": "clean"}
 
 # -------------------------------------------------
 # API WRAPPERS
@@ -190,15 +194,32 @@ def get_watch_stats(user_id=None):
 
 
 def send_message(chat_id, text, reply_markup=None, parse_mode=None):
-    return send_message_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, text, reply_markup, parse_mode)
+    normalized_markup = with_clean_button(reply_markup)
+    message_id = send_message_api(
+        HTTP_SESSION,
+        HTTP_TIMEOUT,
+        TELEGRAM_API,
+        chat_id,
+        text,
+        normalized_markup,
+        parse_mode,
+    )
+    track_chat_flow_message(chat_id, message_id)
+    return message_id
 
 
 def send_photo(chat_id, photo, caption=None, reply_markup=None):
-    return send_photo_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, photo, caption, reply_markup)
+    normalized_markup = with_clean_button(reply_markup)
+    message_id = send_photo_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, photo, caption, normalized_markup)
+    track_chat_flow_message(chat_id, message_id)
+    return message_id
 
 
 def send_video(chat_id, video, caption=None, reply_markup=None):
-    return send_video_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, video, caption, reply_markup)
+    normalized_markup = with_clean_button(reply_markup)
+    message_id = send_video_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, video, caption, normalized_markup)
+    track_chat_flow_message(chat_id, message_id)
+    return message_id
 
 
 def delete_message(chat_id, message_id):
@@ -206,15 +227,115 @@ def delete_message(chat_id, message_id):
 
 
 def edit_message_reply_markup(chat_id, message_id, reply_markup):
-    return edit_message_reply_markup_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, message_id, reply_markup)
+    normalized_markup = with_clean_button(reply_markup)
+    return edit_message_reply_markup_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, message_id, normalized_markup)
 
 
 def edit_message_text(chat_id, message_id, text, reply_markup=None, parse_mode=None):
-    return edit_message_text_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, message_id, text, reply_markup, parse_mode)
+    normalized_markup = with_clean_button(reply_markup)
+    return edit_message_text_api(
+        HTTP_SESSION,
+        HTTP_TIMEOUT,
+        TELEGRAM_API,
+        chat_id,
+        message_id,
+        text,
+        normalized_markup,
+        parse_mode,
+    )
 
 
 def answer_callback_query(callback_query_id, text=None, show_alert=False):
     return answer_callback_query_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, callback_query_id, text, show_alert)
+
+
+def with_clean_button(reply_markup):
+    if not reply_markup:
+        return json.dumps({"inline_keyboard": [[dict(CLEAN_BUTTON)]]})
+
+    markup = reply_markup
+    if isinstance(reply_markup, str):
+        try:
+            markup = json.loads(reply_markup)
+        except json.JSONDecodeError:
+            logging.warning("Invalid reply_markup JSON, leaving markup unchanged")
+            return reply_markup
+
+    if not isinstance(markup, dict):
+        return reply_markup
+
+    inline_keyboard = markup.get("inline_keyboard")
+    if not isinstance(inline_keyboard, list):
+        inline_keyboard = []
+
+    cleaned_keyboard = []
+    for row in inline_keyboard:
+        if not isinstance(row, list):
+            continue
+        cleaned_row = []
+        for button in row:
+            if not isinstance(button, dict):
+                continue
+            callback_data = button.get("callback_data")
+            if callback_data == "clean" or callback_data == "user_action:clean":
+                continue
+            if isinstance(callback_data, str) and callback_data.endswith(":clean"):
+                continue
+            cleaned_row.append(button)
+        if cleaned_row:
+            cleaned_keyboard.append(cleaned_row)
+
+    cleaned_keyboard.append([dict(CLEAN_BUTTON)])
+    markup["inline_keyboard"] = cleaned_keyboard
+    return json.dumps(markup)
+
+
+def track_chat_flow_message(chat_id, message_id):
+    if not message_id:
+        return
+    if chat_start_messages.get(chat_id) == message_id:
+        return
+    history = chat_flow_messages.setdefault(chat_id, [])
+    if message_id not in history:
+        history.append(message_id)
+
+
+def reset_chat_flow(chat_id):
+    chat_flow_messages[chat_id] = []
+    chat_start_messages.pop(chat_id, None)
+
+
+def send_start_message(chat_id, text, parse_mode=None):
+    reset_chat_flow(chat_id)
+    start_markup = json.dumps({"inline_keyboard": [[dict(CLEAN_BUTTON)]]})
+    message_id = send_message_api(
+        HTTP_SESSION,
+        HTTP_TIMEOUT,
+        TELEGRAM_API,
+        chat_id,
+        text,
+        start_markup,
+        parse_mode,
+    )
+    if message_id:
+        chat_start_messages[chat_id] = message_id
+    return message_id
+
+
+def clear_chat_flow(chat_id, current_message_id=None):
+    message_ids = list(chat_flow_messages.pop(chat_id, []))
+    if current_message_id:
+        message_ids.append(current_message_id)
+
+    start_message_id = chat_start_messages.get(chat_id)
+    seen = set()
+    for message_id in message_ids:
+        if not message_id or message_id in seen:
+            continue
+        seen.add(message_id)
+        if start_message_id and message_id == start_message_id:
+            continue
+        delete_message(chat_id, message_id)
 
 
 def set_admin_user_action(tg_id, action, user_id, source_message_id=None, chat_id=None):
@@ -929,7 +1050,7 @@ def handle_start(chat_id, tg_id, first_name):
         
         # Role-based greeting
         if is_admin:
-            send_message(chat_id,
+            send_start_message(chat_id,
                 f"👑 Welcome back, Admin {first_name}!\n\n"
                 f"👤 Username: {username}\n\n"
                 "🔧 Admin Commands:\n"
@@ -945,7 +1066,7 @@ def handle_start(chat_id, tg_id, first_name):
             )
             return
         elif role == ROLE_PRIVILEGED:
-            send_message(chat_id,
+            send_start_message(chat_id,
                 f"⭐ Welcome back, {first_name}!\n\n"
                 f"👤 Username: {username}\n"
                 f"🎯 Status: Privileged User (No subscription required)\n\n"
@@ -961,7 +1082,7 @@ def handle_start(chat_id, tg_id, first_name):
             
             if active and expires_at:  # Check expires_at is not None
                 expiry_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d %H:%M")
-                send_message(chat_id,
+                send_start_message(chat_id,
                     f"👋 Welcome back, {first_name}!\n\n"
                     f"👤 Username: {username}\n"
                     f"✅ Subscription: Active\n"
@@ -975,7 +1096,7 @@ def handle_start(chat_id, tg_id, first_name):
                 )
             elif active and not expires_at:
                 # Edge case: user has permanent access but role not set correctly
-                send_message(chat_id,
+                send_start_message(chat_id,
                     f"👋 Welcome back, {first_name}!\n\n"
                     f"👤 Username: {username}\n"
                     f"✅ Status: Active (Permanent Access)\n\n"
@@ -986,7 +1107,7 @@ def handle_start(chat_id, tg_id, first_name):
                     "/upgrade - Request role upgrade"
                 )
             else:
-                send_message(chat_id,
+                send_start_message(chat_id,
                     f"👋 Welcome back, {first_name}!\n\n"
                     f"👤 Username: {username}\n"
                     f"⚠️ Subscription: Expired\n\n"
@@ -1002,7 +1123,7 @@ def handle_start(chat_id, tg_id, first_name):
         unlinked_users = {uid: u for uid, u in users.items() if not u.get("telegram_id")}
         
         if unlinked_users:
-            send_message(chat_id,
+            send_start_message(chat_id,
                 f"👋 Welcome, {first_name}!\n\n"
                 "Choose an option:\n\n"
                 "1️⃣ Link to existing Jellyfin account:\n"
@@ -1012,7 +1133,7 @@ def handle_start(chat_id, tg_id, first_name):
                 "💡 If you already have a Jellyfin account, use /linkme to connect it to your Telegram."
             )
         else:
-            send_message(chat_id,
+            send_start_message(chat_id,
                 f"👋 Welcome, {first_name}!\n\n"
                 "To get started, please register:\n"
                 "/register"
@@ -1390,7 +1511,6 @@ def build_user_action_keyboard(user_id, user):
         keyboard.append([{"text": "🔗 Link TG", "callback_data": f"user_action:{user_id}:link"}])
 
     keyboard.append([{"text": "📚 Libraries", "callback_data": f"user_action:{user_id}:libraries"}])
-    keyboard.append([{"text": "🧹 Clean Flow", "callback_data": f"user_action:{user_id}:clean"}])
     keyboard.append([{"text": "🗑️ Delete User", "callback_data": f"user_action:{user_id}:delete"}])
     return keyboard
 
@@ -2096,6 +2216,11 @@ def handle_update(update):
             # Log callback query
             activity_logger.info(f"CALLBACK | User: {first_name} (@{username}) | TG_ID: {tg_id} | Data: {data}")
             logging.debug(f"Callback from user {tg_id} (@{username}): {data}")
+
+            if data == "clean":
+                clear_chat_flow(chat_id, current_message_id=callback["message"]["message_id"])
+                handle_start(chat_id, tg_id, first_name)
+                return
             
             # Plan selection
             if data.startswith("plan:"):
@@ -2321,10 +2446,6 @@ def handle_update(update):
 
                 if action == "libraries":
                     show_library_access_menu(chat_id, user_id)
-                    return
-
-                if action == "clean":
-                    clear_admin_user_flow(chat_id, tg_id, current_message_id=callback["message"]["message_id"])
                     return
 
                 if action == "delete":
