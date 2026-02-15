@@ -24,6 +24,9 @@ from bot.jellyfin_api import (
     reset_password,
     set_user_enabled,
     username_available,
+    get_user_policy,
+    set_user_policy,
+    get_library_folders,
 )
 from bot.telegram_api import (
     send_message as send_message_api,
@@ -111,6 +114,18 @@ def check_username_availability(username):
 
 def jellyfin_delete_user(user_id, username):
     return delete_user(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, user_id, username)
+
+
+def jellyfin_get_user_policy(user_id):
+    return get_user_policy(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, user_id)
+
+
+def jellyfin_set_user_policy(user_id, policy):
+    return set_user_policy(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, user_id, policy)
+
+
+def jellyfin_get_library_folders():
+    return get_library_folders(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT)
 
 
 def get_watch_stats(user_id=None):
@@ -1178,6 +1193,118 @@ def handle_pending(chat_id, tg_id):
             record_admin_request(request_key, chat_id, message_id)
 
 
+def build_library_access_menu(user_id):
+    """Build library access summary and inline keyboard for one user."""
+    user = users.get(user_id)
+    if not user:
+        return None, None
+
+    libraries = jellyfin_get_library_folders()
+    if not libraries:
+        return "❌ No libraries found in Jellyfin.", None
+
+    libraries.sort(key=lambda item: item.get("name", "").lower())
+    policy = jellyfin_get_user_policy(user_id)
+    if policy is None:
+        return "❌ Failed to load user policy from Jellyfin.", None
+
+    enable_all = policy.get("EnableAllFolders", True)
+    all_library_ids = [lib["id"] for lib in libraries]
+    if enable_all:
+        selected = set(all_library_ids)
+    else:
+        selected = set(policy.get("EnabledFolders") or [])
+
+    username = user.get("username", user_id)
+    mode_label = "All libraries" if enable_all else "Custom selection"
+    text = (
+        f"📚 Library Access for {username}\n\n"
+        f"Mode: {mode_label}\n"
+        f"Selected: {len(selected)}/{len(libraries)}\n\n"
+        "Tap to toggle library access. ✅ = included, ❌ = restricted."
+    )
+
+    keyboard = []
+    if enable_all:
+        keyboard.append([{"text": "Switch to Custom Selection", "callback_data": f"libmode:{user_id}:custom"}])
+    else:
+        keyboard.append([{"text": "Allow All Libraries", "callback_data": f"libmode:{user_id}:all"}])
+
+    for index, lib in enumerate(libraries):
+        allowed = lib["id"] in selected
+        marker = "✅" if allowed else "❌"
+        keyboard.append([{
+            "text": f"{marker} {lib.get('name', 'Unknown')}",
+            "callback_data": f"libtoggle:{user_id}:{index}"
+        }])
+
+    return text, keyboard
+
+
+def show_library_access_menu(chat_id, user_id, source_message_id=None):
+    text, keyboard = build_library_access_menu(user_id)
+    if source_message_id:
+        delete_message(chat_id, source_message_id)
+    if keyboard is None:
+        send_message(chat_id, text)
+        return
+    send_message(chat_id, text, reply_markup=json.dumps({"inline_keyboard": keyboard}))
+
+
+def apply_library_mode(user_id, mode):
+    libraries = jellyfin_get_library_folders()
+    if not libraries:
+        return False
+
+    policy = jellyfin_get_user_policy(user_id)
+    if policy is None:
+        return False
+
+    library_ids = [lib["id"] for lib in libraries]
+    if mode == "all":
+        policy["EnableAllFolders"] = True
+        policy["EnabledFolders"] = []
+    elif mode == "custom":
+        policy["EnableAllFolders"] = False
+        current = policy.get("EnabledFolders") or library_ids
+        policy["EnabledFolders"] = list(dict.fromkeys(current))
+    else:
+        return False
+
+    return jellyfin_set_user_policy(user_id, policy)
+
+
+def toggle_library_access(user_id, library_index):
+    libraries = jellyfin_get_library_folders()
+    if not libraries:
+        return False
+    libraries.sort(key=lambda item: item.get("name", "").lower())
+
+    if library_index < 0 or library_index >= len(libraries):
+        return False
+
+    policy = jellyfin_get_user_policy(user_id)
+    if policy is None:
+        return False
+
+    library_ids = [lib["id"] for lib in libraries]
+    if policy.get("EnableAllFolders", True):
+        selected = set(library_ids)
+    else:
+        selected = set(policy.get("EnabledFolders") or [])
+
+    target_id = libraries[library_index]["id"]
+    if target_id in selected:
+        selected.remove(target_id)
+    else:
+        selected.add(target_id)
+
+    policy["EnableAllFolders"] = False
+    policy["EnabledFolders"] = [lib_id for lib_id in library_ids if lib_id in selected]
+
+    return jellyfin_set_user_policy(user_id, policy)
+
+
 def handle_users(chat_id, tg_id):
     """Handle /users command (admin only)"""
     if str(tg_id) not in admins:
@@ -1928,6 +2055,46 @@ def handle_update(update):
                 
                 return
 
+            if data.startswith("libmode:"):
+                if not is_admin:
+                    send_message(chat_id, "❌ Admin access required.")
+                    return
+
+                _, user_id, mode = data.split(":", 2)
+                if user_id not in users:
+                    send_message(chat_id, "❌ User not found.")
+                    return
+
+                if not apply_library_mode(user_id, mode):
+                    send_message(chat_id, "❌ Failed to update library mode.")
+                    return
+
+                show_library_access_menu(chat_id, user_id, callback["message"]["message_id"])
+                return
+
+            if data.startswith("libtoggle:"):
+                if not is_admin:
+                    send_message(chat_id, "❌ Admin access required.")
+                    return
+
+                _, user_id, index_value = data.split(":", 2)
+                if user_id not in users:
+                    send_message(chat_id, "❌ User not found.")
+                    return
+
+                try:
+                    library_index = int(index_value)
+                except ValueError:
+                    send_message(chat_id, "❌ Invalid library selection.")
+                    return
+
+                if not toggle_library_access(user_id, library_index):
+                    send_message(chat_id, "❌ Failed to update library access.")
+                    return
+
+                show_library_access_menu(chat_id, user_id, callback["message"]["message_id"])
+                return
+
             if data.startswith("user:"):
                 if not is_admin:
                     send_message(chat_id, "❌ Admin access required.")
@@ -1949,6 +2116,7 @@ def handle_update(update):
                     [{"text": "⬇️ Downgrade", "callback_data": f"user_action:{user_id}:downgrade"}],
                     [{"text": "🔗 Link TG", "callback_data": f"user_action:{user_id}:link"}],
                     [{"text": "🔓 Unlink TG", "callback_data": f"user_action:{user_id}:unlink"}],
+                    [{"text": "📚 Libraries", "callback_data": f"user_action:{user_id}:libraries"}],
                     [{"text": "🗑️ Delete User", "callback_data": f"user_action:{user_id}:delete"}],
                 ]
 
@@ -2018,6 +2186,10 @@ def handle_update(update):
 
                 if action == "unlink":
                     handle_admin_unlink(chat_id, tg_id, [username_value])
+                    return
+
+                if action == "libraries":
+                    show_library_access_menu(chat_id, user_id)
                     return
 
                 if action == "delete":
@@ -2794,6 +2966,7 @@ def handle_update(update):
                     [{"text": "⬇️ Downgrade", "callback_data": f"user_action:{user_id}:downgrade"}],
                     [{"text": "🔗 Link TG", "callback_data": f"user_action:{user_id}:link"}],
                     [{"text": "🔓 Unlink TG", "callback_data": f"user_action:{user_id}:unlink"}],
+                    [{"text": "📚 Libraries", "callback_data": f"user_action:{user_id}:libraries"}],
                     [{"text": "🗑️ Delete User", "callback_data": f"user_action:{user_id}:delete"}],
                 ]
                 send_message(
