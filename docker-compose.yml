@@ -1,0 +1,11 @@
+version: "3.9"
+
+services:
+  jellyfin-bot:
+    build: ./app
+    container_name: jellyfin-telegram-bot
+    restart: unless-stopped
+    volumes:
+      - ./app/config:/app/config
+      - ./app/data:/app/data
+      - ./app/logs:/app/logs

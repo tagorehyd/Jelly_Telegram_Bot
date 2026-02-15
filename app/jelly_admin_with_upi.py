@@ -11,170 +11,50 @@ from pathlib import Path
 from threading import Lock, Thread
 from datetime import datetime, timedelta
 
+from bot.config_loader import CONFIG_FILE, SECRETS_FILE, load_config
+from bot.http_client import HTTP_SESSION, HTTP_TIMEOUT, POLL_LONG_TIMEOUT, POLL_TIMEOUT
+from bot.logging_setup import setup_logging
+from bot.jellyfin_api import (
+    fetch_users,
+    create_user,
+    get_user_id,
+    delete_user,
+    get_top_items,
+    get_user_played_runtime,
+    reset_password,
+    set_user_enabled,
+    username_available,
+)
+from bot.telegram_api import (
+    send_message as send_message_api,
+    send_photo as send_photo_api,
+    send_video as send_video_api,
+    delete_message as delete_message_api,
+    edit_message_reply_markup as edit_message_reply_markup_api,
+)
+
 # -------------------------------------------------
 # CONFIG LOADING + BOOTSTRAP
 # -------------------------------------------------
 
-CONFIG_FILE = "config.json"
-
-def create_sample_config():
-    """Create a sample config file for first-time setup"""
-    sample_config = {
-        "bot_token": "YOUR_TELEGRAM_BOT_TOKEN_HERE",
-        "jellyfin": {
-            "url": "http://your-jellyfin-server:8096",
-            "api_key": "YOUR_JELLYFIN_API_KEY_HERE"
-        },
-        "payment": {
-            "upi_id": "yourname@paytm",
-            "upi_name": "Your Name"
-        },
-        "storage": {
-            "admins": "data/admins.json",
-            "users": "data/users.json",
-            "pending": "data/pending.json",
-            "subscriptions": "data/subscriptions.json",
-            "payment_requests": "data/payment_requests.json"
-        },
-        "subscription_plans": {
-            "1day": {"duration_days": 1, "price": 5, "name": "1 Day"},
-            "1week": {"duration_days": 7, "price": 10, "name": "1 Week"},
-            "1month": {"duration_days": 30, "price": 35, "name": "1 Month"}
-        }
-    }
-    
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(sample_config, f, indent=2)
-    
-    print(f"""
-╔══════════════════════════════════════════════════════════════════════════╗
-║                        FIRST TIME SETUP DETECTED                         ║
-╚══════════════════════════════════════════════════════════════════════════╝
-
-A sample configuration file has been created: {CONFIG_FILE}
-
-📝 NEXT STEPS:
-
-1. Get your Telegram Bot Token:
-   • Talk to @BotFather on Telegram
-   • Create a new bot with /newbot
-   • Copy the token and paste it in config.json
-
-2. Get your Jellyfin API Key:
-   • Log in to your Jellyfin admin dashboard
-   • Go to Dashboard → API Keys
-   • Create a new API key
-   • Copy it and paste it in config.json
-
-3. Configure UPI Payment:
-   • Add your UPI ID (e.g., yourname@paytm)
-   • Add your name for payment reference
-
-4. Update the config file:
-   • Edit {CONFIG_FILE}
-   • Replace all placeholder values with your actual values
-   • Make sure the Jellyfin URL is correct
-
-5. Create the data directory:
-   • mkdir -p data
-
-6. Run the bot again (second run):
-   • python jelly_admin_with_upi.py
-   • This will load all users from Jellyfin server
-   • All users will be marked as privileged initially
-
-7. After second run, configure admin(s):
-   • Open data/users.json
-   • Find user(s) with "is_admin": true
-   • Add "telegram_id" field with their Telegram ID
-   • You can make additional users admin by setting "is_admin": true and adding telegram_id
-   • Get Telegram IDs from @userinfobot
-
-8. Third run will sync admins automatically:
-   • python jelly_admin_with_upi.py
-   • admins.json is auto-generated from users.json (don't edit it directly)
-   • Only edit users.json to manage admins
-
-╔══════════════════════════════════════════════════════════════════════════╗
-║  The bot will start once you've configured {CONFIG_FILE}  ║
-╚══════════════════════════════════════════════════════════════════════════╝
-""")
-
-def load_config():
-    if not Path(CONFIG_FILE).exists():
-        create_sample_config()
-        sys.exit(0)
-    
-    try:
-        with open(CONFIG_FILE, "r") as f:
-            config = json.load(f)
-        
-        # Validate required keys
-        required_keys = {
-            "bot_token": str,
-            "jellyfin": dict,
-            "storage": dict
-        }
-        
-        for key, expected_type in required_keys.items():
-            if key not in config:
-                raise ValueError(f"Missing required config key: {key}")
-            if not isinstance(config[key], expected_type):
-                raise ValueError(f"Config key '{key}' must be of type {expected_type.__name__}")
-        
-        # Validate nested keys
-        if "url" not in config["jellyfin"] or "api_key" not in config["jellyfin"]:
-            raise ValueError("jellyfin config must contain 'url' and 'api_key'")
-        
-        if not all(k in config["storage"] for k in ["admins", "users", "pending"]):
-            raise ValueError("storage config must contain 'admins', 'users', and 'pending'")
-        
-        # Add payment config if not present
-        if "payment" not in config:
-            config["payment"] = {
-                "upi_id": "yourname@paytm",
-                "upi_name": "Your Name"
-            }
-        
-        # Add subscription plans if not present
-        if "subscription_plans" not in config:
-            config["subscription_plans"] = {
-                "1day": {"duration_days": 1, "price": 5, "name": "1 Day"},
-                "1week": {"duration_days": 7, "price": 10, "name": "1 Week"},
-                "1month": {"duration_days": 30, "price": 35, "name": "1 Month"}
-            }
-        
-        # Add storage paths if not present
-        if "subscriptions" not in config["storage"]:
-            config["storage"]["subscriptions"] = "data/subscriptions.json"
-        if "payment_requests" not in config["storage"]:
-            config["storage"]["payment_requests"] = "data/payment_requests.json"
-        if "telegram_mapping" not in config["storage"]:
-            config["storage"]["telegram_mapping"] = "data/telegram_mapping.json"
-        
-        return config
-        
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Invalid JSON in config.json: {e}")
-
-config = load_config()
+config, secrets_config, STRINGS = load_config()
 
 # Validate config is not using placeholder values
-if config["bot_token"] == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
-    print("❌ Error: Please configure your bot_token in config.json")
+if secrets_config["bot_token"] == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
+    print(f"❌ Error: Please configure your bot_token in {SECRETS_FILE}")
     sys.exit(1)
 
-if config["jellyfin"]["api_key"] == "YOUR_JELLYFIN_API_KEY_HERE":
-    print("❌ Error: Please configure your Jellyfin api_key in config.json")
+if secrets_config["jellyfin_api_key"] == "YOUR_JELLYFIN_API_KEY_HERE":
+    print(f"❌ Error: Please configure your Jellyfin api_key in {SECRETS_FILE}")
     sys.exit(1)
 
 # -------------------------------------------------
 # GLOBAL VARIABLES
 # -------------------------------------------------
 
-TELEGRAM_API = f"https://api.telegram.org/bot{config['bot_token']}"
+TELEGRAM_API = f"https://api.telegram.org/bot{secrets_config['bot_token']}"
 JELLYFIN_URL = config["jellyfin"]["url"]
-JELLYFIN_API_KEY = config["jellyfin"]["api_key"]
+JELLYFIN_API_KEY = secrets_config["jellyfin_api_key"]
 UPI_ID = config["payment"]["upi_id"]
 UPI_NAME = config["payment"]["upi_name"]
 
@@ -198,20 +78,170 @@ broadcast_mode = {}
 target_broadcast = {}
 awaiting_username = {}  # Track users who need to provide username: {tg_id: {name, requested_at}}
 username_to_uid = {}  # Fast username lookup: {username.lower(): jellyfin_user_id}
+admin_request_messages = {}
+admin_user_actions = {}
+
+# -------------------------------------------------
+# API WRAPPERS
+# -------------------------------------------------
+
+def jellyfin_create_user(username, password):
+    return create_user(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, username, password)
+
+
+def jellyfin_get_user_id(username):
+    return get_user_id(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, username)
+
+
+def jellyfin_enable_user(username):
+    return set_user_enabled(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, username, True)
+
+
+def jellyfin_disable_user(username):
+    return set_user_enabled(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, username, False)
+
+
+def jellyfin_reset_password(username, new_password):
+    return reset_password(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, username, new_password)
+
+
+def check_username_availability(username):
+    return username_available(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, username)
+
+
+def jellyfin_delete_user(user_id, username):
+    return delete_user(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT, user_id, username)
+
+
+def get_watch_stats(user_id=None):
+    top_series = get_top_items(
+        JELLYFIN_URL,
+        JELLYFIN_API_KEY,
+        HTTP_SESSION,
+        HTTP_TIMEOUT,
+        "Series",
+        user_id=user_id,
+    )
+    top_movies = get_top_items(
+        JELLYFIN_URL,
+        JELLYFIN_API_KEY,
+        HTTP_SESSION,
+        HTTP_TIMEOUT,
+        "Movie",
+        user_id=user_id,
+    )
+    runtime_users = []
+    if user_id is None:
+        for uid, user in users.items():
+            total_ticks = get_user_played_runtime(
+                JELLYFIN_URL,
+                JELLYFIN_API_KEY,
+                HTTP_SESSION,
+                HTTP_TIMEOUT,
+                uid,
+            )
+            if total_ticks:
+                runtime_users.append((user.get("username", uid), total_ticks))
+
+        runtime_users.sort(key=lambda item: item[1], reverse=True)
+        runtime_users = runtime_users[:10]
+
+    def format_top(title, items):
+        lines = [title]
+        if not items:
+            lines.append("  - No data")
+            return "\n".join(lines)
+        for idx, (name, count) in enumerate(items, start=1):
+            lines.append(f"  {idx}. {name} ({count})")
+        return "\n".join(lines)
+
+    parts = [
+        format_top("Top 10 Series:", top_series),
+        format_top("Top 10 Movies:", top_movies),
+    ]
+
+    if runtime_users:
+        runtime_lines = ["Top 10 Runtime Users (hours):"]
+        for idx, (name, ticks) in enumerate(runtime_users, start=1):
+            hours = round((ticks / 10_000_000) / 3600, 2)
+            runtime_lines.append(f"  {idx}. {name} ({hours}h)")
+        parts.append("\n".join(runtime_lines))
+
+    return "\n\n".join(parts)
+
+
+def send_message(chat_id, text, reply_markup=None, parse_mode=None):
+    return send_message_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, text, reply_markup, parse_mode)
+
+
+def send_photo(chat_id, photo, caption=None, reply_markup=None):
+    return send_photo_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, photo, caption, reply_markup)
+
+
+def send_video(chat_id, video, caption=None, reply_markup=None):
+    return send_video_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, video, caption, reply_markup)
+
+
+def delete_message(chat_id, message_id):
+    return delete_message_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, message_id)
+
+
+def edit_message_reply_markup(chat_id, message_id, reply_markup):
+    return edit_message_reply_markup_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, message_id, reply_markup)
+
+def set_admin_user_action(tg_id, action, user_id, source_message_id=None):
+    admin_user_actions[tg_id] = {
+        "action": action,
+        "user_id": user_id,
+        "source_message_id": source_message_id,
+    }
+
+
+def record_admin_request(request_key, admin_id, message_id):
+    if not request_key or not message_id:
+        return
+    admin_request_messages.setdefault(request_key, {})[admin_id] = message_id
+
+
+def revoke_admin_request(request_key):
+    messages = admin_request_messages.pop(request_key, {})
+    for admin_id, message_id in messages.items():
+        delete_message(admin_id, message_id)
+
+
+def notify_admins(request_key, text, reply_markup=None, parse_mode=None):
+    for admin_id in admins:
+        message_id = send_message(admin_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
+        record_admin_request(request_key, admin_id, message_id)
+
+
+def notify_admins_notice(text, parse_mode=None):
+    for admin_id in admins:
+        send_message(admin_id, text, parse_mode=parse_mode)
+
+
+def notify_admins_notice_except(exclude_id, text, parse_mode=None):
+    for admin_id in admins:
+        if str(admin_id) == str(exclude_id):
+            continue
+        send_message(admin_id, text, parse_mode=parse_mode)
+
+
+def update_admin_request_buttons(request_key, text):
+    messages = admin_request_messages.get(request_key, {})
+    if not messages:
+        return
+    markup = json.dumps({"inline_keyboard": [[{"text": text, "callback_data": "noop"}]]})
+    for admin_id, message_id in messages.items():
+        edit_message_reply_markup(admin_id, message_id, markup)
+
+
+def clear_admin_user_action(tg_id):
+    admin_user_actions.pop(tg_id, None)
 
 # -------------------------------------------------
 # JELLYFIN USER BOOTSTRAP (SECOND RUN)
 # -------------------------------------------------
-
-def fetch_jellyfin_users():
-    resp = requests.get(
-        f"{JELLYFIN_URL}/Users",
-        headers={"X-Emby-Token": JELLYFIN_API_KEY},
-        timeout=10
-    )
-    resp.raise_for_status()
-    return resp.json()
-
 
 def bootstrap_users_from_server():
     users_file = Path(config["storage"]["users"])
@@ -223,10 +253,10 @@ def bootstrap_users_from_server():
     print("🔄 Second run detected - Loading users from Jellyfin server...")
 
     try:
-        jelly_users = fetch_jellyfin_users()
+        jelly_users = fetch_users(JELLYFIN_URL, JELLYFIN_API_KEY, HTTP_SESSION, HTTP_TIMEOUT)
     except Exception as e:
         print(f"❌ Failed to connect to Jellyfin server: {e}")
-        print("⚠️ Make sure your Jellyfin URL and API key are correct in config.json")
+        print(f"⚠️ Make sure your Jellyfin URL is correct in {CONFIG_FILE} and API key is correct in {SECRETS_FILE}")
         sys.exit(1)
 
     users = {}
@@ -286,77 +316,6 @@ def bootstrap_users_from_server():
 # UTILITY FUNCTIONS
 # -------------------------------------------------
 
-def setup_logging():
-    """Setup comprehensive logging system with separate info and debug logs"""
-    
-    # Create logs directory if it doesn't exist
-    Path("logs").mkdir(exist_ok=True)
-    
-    # Create formatters
-    detailed_formatter = logging.Formatter(
-        '%(asctime)s | %(levelname)-8s | %(funcName)-20s | Line %(lineno)-4d | %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    
-    simple_formatter = logging.Formatter(
-        '%(asctime)s [%(levelname)s] %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    
-    # Get root logger
-    logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)  # Capture everything
-    
-    # Remove any existing handlers
-    logger.handlers.clear()
-    
-    # Handler 1: Console output (INFO and above)
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(simple_formatter)
-    logger.addHandler(console_handler)
-    
-    # Handler 2: General log file (INFO and above)
-    info_handler = logging.FileHandler("logs/bot.log", encoding='utf-8')
-    info_handler.setLevel(logging.INFO)
-    info_handler.setFormatter(simple_formatter)
-    logger.addHandler(info_handler)
-    
-    # Handler 3: Debug log file (ALL messages including DEBUG)
-    debug_handler = logging.FileHandler("logs/debug.log", encoding='utf-8')
-    debug_handler.setLevel(logging.DEBUG)
-    debug_handler.setFormatter(detailed_formatter)
-    logger.addHandler(debug_handler)
-    
-    # Handler 4: Error log file (ERROR and CRITICAL only)
-    error_handler = logging.FileHandler("logs/error.log", encoding='utf-8')
-    error_handler.setLevel(logging.ERROR)
-    error_handler.setFormatter(detailed_formatter)
-    logger.addHandler(error_handler)
-    
-    # Handler 5: User activity log (custom logger for tracking all user interactions)
-    activity_logger = logging.getLogger('user_activity')
-    activity_logger.setLevel(logging.DEBUG)
-    activity_logger.propagate = False  # Don't propagate to root logger
-    
-    activity_handler = logging.FileHandler("logs/user_activity.log", encoding='utf-8')
-    activity_handler.setLevel(logging.DEBUG)
-    activity_formatter = logging.Formatter(
-        '%(asctime)s | %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    activity_handler.setFormatter(activity_formatter)
-    activity_logger.addHandler(activity_handler)
-    
-    logging.info("=" * 80)
-    logging.info("LOGGING SYSTEM INITIALIZED")
-    logging.info("=" * 80)
-    logging.info(f"Console Output: INFO level and above")
-    logging.info(f"General Log: logs/bot.log (INFO+)")
-    logging.info(f"Debug Log: logs/debug.log (ALL messages)")
-    logging.info(f"Error Log: logs/error.log (ERROR+)")
-    logging.info(f"Activity Log: logs/user_activity.log (All user interactions)")
-    logging.info("=" * 80)
 
 def save_json(filepath, data):
     filepath.parent.mkdir(parents=True, exist_ok=True)
@@ -714,198 +673,9 @@ def get_user_by_telegram_id(tg_id):
         return user_id, users[user_id]
     return None, None
 
-def jellyfin_create_user(username, password):
-    """Create a new Jellyfin user"""
-    try:
-        resp = requests.post(
-            f"{JELLYFIN_URL}/Users/New",
-            headers={"X-Emby-Token": JELLYFIN_API_KEY, "Content-Type": "application/json"},
-            json={"Name": username, "Password": password},
-            timeout=10
-        )
-        if resp.status_code == 200:
-            logging.info(f"Jellyfin user '{username}' created successfully")
-            return True
-        else:
-            logging.error(f"Failed to create Jellyfin user '{username}': {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        logging.error(f"Error creating Jellyfin user '{username}': {e}")
-        return False
-
-def jellyfin_get_user_id(username):
-    """Get Jellyfin user ID by username"""
-    try:
-        resp = requests.get(
-            f"{JELLYFIN_URL}/Users",
-            headers={"X-Emby-Token": JELLYFIN_API_KEY},
-            timeout=10
-        )
-        if resp.status_code == 200:
-            for user in resp.json():
-                if user["Name"].lower() == username.lower():
-                    return user["Id"]
-        return None
-    except Exception as e:
-        logging.error(f"Error getting Jellyfin user ID for '{username}': {e}")
-        return None
-
-def jellyfin_enable_user(username):
-    """Enable a Jellyfin user"""
-    user_id = jellyfin_get_user_id(username)
-    if not user_id:
-        logging.error(f"Cannot enable user '{username}': User not found")
-        return False
-    
-    try:
-        # Get current user policy
-        resp = requests.get(
-            f"{JELLYFIN_URL}/Users/{user_id}",
-            headers={"X-Emby-Token": JELLYFIN_API_KEY},
-            timeout=10
-        )
-        if resp.status_code != 200:
-            logging.error(f"Failed to get user policy for '{username}'")
-            return False
-        
-        user_data = resp.json()
-        policy = user_data.get("Policy", {})
-        policy["IsDisabled"] = False
-        
-        # Update user policy
-        resp = requests.post(
-            f"{JELLYFIN_URL}/Users/{user_id}/Policy",
-            headers={"X-Emby-Token": JELLYFIN_API_KEY, "Content-Type": "application/json"},
-            json=policy,
-            timeout=10
-        )
-        
-        if resp.status_code == 204 or resp.status_code == 200:
-            logging.info(f"Jellyfin user '{username}' enabled successfully")
-            return True
-        else:
-            logging.error(f"Failed to enable Jellyfin user '{username}': {resp.status_code}")
-            return False
-    except Exception as e:
-        logging.error(f"Error enabling Jellyfin user '{username}': {e}")
-        return False
-
-def jellyfin_disable_user(username):
-    """Disable a Jellyfin user"""
-    user_id = jellyfin_get_user_id(username)
-    if not user_id:
-        logging.error(f"Cannot disable user '{username}': User not found")
-        return False
-    
-    try:
-        # Get current user policy
-        resp = requests.get(
-            f"{JELLYFIN_URL}/Users/{user_id}",
-            headers={"X-Emby-Token": JELLYFIN_API_KEY},
-            timeout=10
-        )
-        if resp.status_code != 200:
-            logging.error(f"Failed to get user policy for '{username}'")
-            return False
-        
-        user_data = resp.json()
-        policy = user_data.get("Policy", {})
-        policy["IsDisabled"] = True
-        
-        # Update user policy
-        resp = requests.post(
-            f"{JELLYFIN_URL}/Users/{user_id}/Policy",
-            headers={"X-Emby-Token": JELLYFIN_API_KEY, "Content-Type": "application/json"},
-            json=policy,
-            timeout=10
-        )
-        
-        if resp.status_code == 204 or resp.status_code == 200:
-            logging.info(f"Jellyfin user '{username}' disabled successfully")
-            return True
-        else:
-            logging.error(f"Failed to disable Jellyfin user '{username}': {resp.status_code}")
-            return False
-    except Exception as e:
-        logging.error(f"Error disabling Jellyfin user '{username}': {e}")
-        return False
-
-def jellyfin_reset_password(username, new_password):
-    """Reset password for a Jellyfin user"""
-    user_id = jellyfin_get_user_id(username)
-    if not user_id:
-        logging.error(f"Cannot reset password for '{username}': User not found")
-        return False
-    
-    try:
-        resp = requests.post(
-            f"{JELLYFIN_URL}/Users/{user_id}/Password",
-            headers={"X-Emby-Token": JELLYFIN_API_KEY, "Content-Type": "application/json"},
-            json={"NewPw": new_password},
-            timeout=10
-        )
-        
-        if resp.status_code == 204 or resp.status_code == 200:
-            logging.info(f"Password reset for Jellyfin user '{username}' successful")
-            return True
-        else:
-            logging.error(f"Failed to reset password for '{username}': {resp.status_code} - {resp.text}")
-            return False
-    except Exception as e:
-        logging.error(f"Error resetting password for '{username}': {e}")
-        return False
-
 # -------------------------------------------------
 # TELEGRAM API FUNCTIONS
 # -------------------------------------------------
-
-def send_message(chat_id, text, reply_markup=None, parse_mode=None):
-    """Send a text message"""
-    payload = {"chat_id": chat_id, "text": text}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
-    try:
-        requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=10)
-    except Exception as e:
-        logging.error(f"Failed to send message to {chat_id}: {e}")
-
-def send_photo(chat_id, photo, caption=None, reply_markup=None):
-    """Send a photo"""
-    payload = {"chat_id": chat_id, "photo": photo}
-    if caption:
-        payload["caption"] = caption
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    try:
-        response = requests.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=10)
-        if response.status_code != 200:
-            logging.error(f"Failed to send photo to {chat_id}: {response.status_code} - {response.text}")
-        else:
-            logging.info(f"Photo sent successfully to {chat_id}")
-        return response.status_code == 200
-    except Exception as e:
-        logging.error(f"Failed to send photo to {chat_id}: {e}")
-        return False
-
-def send_video(chat_id, video, caption=None, reply_markup=None):
-    """Send a video"""
-    payload = {"chat_id": chat_id, "video": video}
-    if caption:
-        payload["caption"] = caption
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    try:
-        response = requests.post(f"{TELEGRAM_API}/sendVideo", json=payload, timeout=10)
-        if response.status_code != 200:
-            logging.error(f"Failed to send video to {chat_id}: {response.status_code} - {response.text}")
-        else:
-            logging.info(f"Video sent successfully to {chat_id}")
-        return response.status_code == 200
-    except Exception as e:
-        logging.error(f"Failed to send video to {chat_id}: {e}")
-        return False
 
 def generate_upi_qr(amount, plan_name):
     """Generate UPI payment link"""
@@ -1055,14 +825,8 @@ def handle_start(chat_id, tg_id, first_name):
                 "/users - List all users\n"
                 "/stats - View system statistics\n"
                 "/broadcast - Send message to all users\n"
-                "/message <username> - Send message to specific user\n\n"
-                "👥 User Management:\n"
-                "/link <username> <telegram_id> - Link user to Telegram ID\n"
-                "/unlink <username> - Unlink user from Telegram ID\n\n"
-                "💳 Subscription Management:\n"
-                "/subinfo <username> - View subscription details\n"
-                "/subextend <username> <days> - Extend subscription\n"
-                "/subend <username> - End subscription\n\n"
+                "/message <username> - Send message to specific user\n"
+                "/downgrade <username> <role> - Downgrade user role\n\n"
                 "🔐 Personal:\n"
                 "/resetpw - Reset your password"
             )
@@ -1074,7 +838,8 @@ def handle_start(chat_id, tg_id, first_name):
                 f"🎯 Status: Privileged User (No subscription required)\n\n"
                 "Commands:\n"
                 "/resetpw - Reset password\n"
-                "/unlinkme - Unlink Telegram account"
+                "/unlinkme - Unlink Telegram account\n"
+                "/upgrade - Request role upgrade"
             )
             return
         else:
@@ -1092,7 +857,8 @@ def handle_start(chat_id, tg_id, first_name):
                     "/subscribe - Renew subscription\n"
                     "/status - Check subscription\n"
                     "/resetpw - Reset password\n"
-                    "/unlinkme - Unlink Telegram account"
+                    "/unlinkme - Unlink Telegram account\n"
+                    "/upgrade - Request role upgrade"
                 )
             elif active and not expires_at:
                 # Edge case: user has permanent access but role not set correctly
@@ -1103,7 +869,8 @@ def handle_start(chat_id, tg_id, first_name):
                     "Commands:\n"
                     "/status - Check status\n"
                     "/resetpw - Reset password\n"
-                    "/unlinkme - Unlink Telegram account"
+                    "/unlinkme - Unlink Telegram account\n"
+                    "/upgrade - Request role upgrade"
                 )
             else:
                 send_message(chat_id,
@@ -1113,7 +880,8 @@ def handle_start(chat_id, tg_id, first_name):
                     "Use /subscribe to renew your access!\n\n"
                     "Other commands:\n"
                     "/resetpw - Reset password\n"
-                    "/unlinkme - Unlink Telegram account"
+                    "/unlinkme - Unlink Telegram account\n"
+                    "/upgrade - Request role upgrade"
                 )
             return
     else:
@@ -1166,30 +934,6 @@ def handle_register(chat_id, tg_id, username, first_name):
         f"Send /cancel to cancel registration."
     )
     logging.info(f"User {tg_id} started registration process")
-
-def check_username_availability(username):
-    """Check if username is available in Jellyfin - returns False on any error (safe default)"""
-    try:
-        resp = requests.get(
-            f"{JELLYFIN_URL}/Users",
-            headers={"X-Emby-Token": JELLYFIN_API_KEY},
-            timeout=10
-        )
-        if resp.status_code != 200:
-            logging.error(f"Jellyfin API error while checking username: {resp.status_code} - {resp.text}")
-            return False  # Safe default - assume not available on error
-        
-        existing_users = resp.json()
-        for user in existing_users:
-            if user["Name"].lower() == username.lower():
-                return False  # Username taken
-        return True  # Username available
-    except requests.exceptions.Timeout:
-        logging.error(f"Timeout checking username availability for '{username}'")
-        return False  # Safe default
-    except Exception as e:
-        logging.error(f"Error checking username availability for '{username}': {e}")
-        return False  # Safe default
 
 def validate_username(username):
     """Validate username format"""
@@ -1306,20 +1050,19 @@ def handle_resetpw(chat_id, tg_id):
     
     send_message(chat_id, "🔐 Password reset request submitted.\n\nPlease wait for admin approval.")
     
-    # Notify admins
-    for admin_id in admins:
-        send_message(
-            admin_id,
-            f"🔐 Password reset request:\n\n"
-            f"Username: {user['username']}\n"
-            f"Telegram ID: {tg_id}",
-            reply_markup=json.dumps({
-                "inline_keyboard": [[
-                    {"text": "✅ Approve", "callback_data": f"reset_ok:{tg_id}"},
-                    {"text": "❌ Reject", "callback_data": f"reset_no:{tg_id}"}
-                ]]
-            })
-        )
+    request_key = f"reset:{tg_id}"
+    notify_admins(
+        request_key,
+        f"🔐 Password reset request:\n\n"
+        f"Username: {user['username']}\n"
+        f"Telegram ID: {tg_id}",
+        reply_markup=json.dumps({
+            "inline_keyboard": [[
+                {"text": "✅ Approve", "callback_data": f"reset_ok:{tg_id}"},
+                {"text": "❌ Reject", "callback_data": f"reset_no:{tg_id}"}
+            ]]
+        })
+    )
 
 def handle_pending(chat_id, tg_id):
     """Handle /pending command (admin only)"""
@@ -1333,10 +1076,11 @@ def handle_pending(chat_id, tg_id):
     
     for uid, p in pending.items():
         request_type = p.get("type", "register")
+        request_key = f"{request_type}:{uid}"
         
         if request_type == "link":
             # Link request
-            send_message(
+            message_id = send_message(
                 chat_id,
                 f"🔗 Link Request:\n\n"
                 f"👤 Name: {p['name']}\n"
@@ -1349,9 +1093,10 @@ def handle_pending(chat_id, tg_id):
                     ]]
                 })
             )
+            record_admin_request(request_key, chat_id, message_id)
         elif request_type == "unlink":
             # Unlink request
-            send_message(
+            message_id = send_message(
                 chat_id,
                 f"🔓 Unlink Request:\n\n"
                 f"👤 Username: {p['username']}\n"
@@ -1363,9 +1108,10 @@ def handle_pending(chat_id, tg_id):
                     ]]
                 })
             )
+            record_admin_request(request_key, chat_id, message_id)
         else:
             # Registration request
-            send_message(
+            message_id = send_message(
                 chat_id,
                 f"📨 Registration Request:\n\n"
                 f"Name: {p['name']}\n"
@@ -1378,6 +1124,7 @@ def handle_pending(chat_id, tg_id):
                     ]]
                 })
             )
+            record_admin_request(request_key, chat_id, message_id)
 
 
 def handle_users(chat_id, tg_id):
@@ -1411,39 +1158,43 @@ def handle_users(chat_id, tg_id):
     if admin_users:
         user_list += "**👑 Admins:**\n"
         for uid, u in admin_users:
-            user_list += f"👑 `{u['username']}`\n"
+            tg_label = f" (TG: {u['telegram_id']})" if u.get("telegram_id") else ""
+            user_list += f"👑 `{u['username']}`{tg_label}\n"
         user_list += "\n"
     
     # Display privileged users
     if privileged_users:
         user_list += "**⭐ Privileged Users:**\n"
         for uid, u in privileged_users:
-            user_list += f"⭐ `{u['username']}`\n"
+            tg_label = f" (TG: {u['telegram_id']})" if u.get("telegram_id") else ""
+            user_list += f"⭐ `{u['username']}`{tg_label}\n"
         user_list += "\n"
     
     # Display regular users with subscription status
     if regular_users:
         user_list += "**👤 Regular Users:**\n"
         for uid, u in regular_users:
+            tg_label = f" (TG: {u['telegram_id']})" if u.get("telegram_id") else ""
             active, expires_at = check_subscription_status(uid)
             if active and expires_at:
                 expiry_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d")
-                user_list += f"👤 `{u['username']}` - ✅ Active (expires {expiry_date})\n"
+                user_list += f"👤 `{u['username']}`{tg_label} - ✅ Active (expires {expiry_date})\n"
             elif active and not expires_at:
-                user_list += f"👤 `{u['username']}` - ✅ Active (permanent)\n"
+                user_list += f"👤 `{u['username']}`{tg_label} - ✅ Active (permanent)\n"
             else:
-                user_list += f"👤 `{u['username']}` - ❌ Expired\n"
+                user_list += f"👤 `{u['username']}`{tg_label} - ❌ Expired\n"
     
     user_list += f"\n📊 Total: {len(users)} users\n"
     user_list += f"👑 Admins: {len(admin_users)}\n"
     user_list += f"⭐ Privileged: {len(privileged_users)}\n"
     user_list += f"👤 Regular: {len(regular_users)}\n\n"
-    user_list += "💡 To manage a user's subscription, use:\n"
-    user_list += "`/subinfo <username>` - View subscription details\n"
-    user_list += "`/subextend <username> <days>` - Extend subscription\n"
-    user_list += "`/subend <username>` - End subscription"
+    user_list += "💡 Tap a user below to manage subscriptions, roles, and links."
     
-    send_message(chat_id, user_list, parse_mode="Markdown")
+    command_lines = [f"/{u.get('username')}_info" for _, u in users.items() if u.get("username")]
+    if command_lines:
+        user_list += "\n\n" + "\n".join(command_lines)
+
+    send_message(chat_id, user_list)
 
 def handle_broadcast(chat_id, tg_id):
     """Handle /broadcast command (admin only)"""
@@ -1478,28 +1229,8 @@ def handle_stats(chat_id, tg_id):
         send_message(chat_id, "❌ Admin access required.")
         return
     
-    total_users = len(users)
-    linked_users = sum(1 for u in users.values() if u.get("telegram_id"))
-    unlinked_users = total_users - linked_users
-    active_subs = sum(1 for uid in users if check_subscription_status(uid)[0])
-    
-    pending_registrations = sum(1 for p in pending.values() if p.get("type", "register") == "register")
-    pending_links = sum(1 for p in pending.values() if p.get("type") == "link")
-    pending_unlinks = sum(1 for p in pending.values() if p.get("type") == "unlink")
-    pending_payments = sum(1 for req in payment_requests.values() if req["status"] == "pending")
-    
-    send_message(chat_id,
-        f"📊 System Statistics\n\n"
-        f"👥 Total Jellyfin Users: {total_users}\n"
-        f"🔗 Linked to Telegram: {linked_users}\n"
-        f"🔓 Unlinked: {unlinked_users}\n"
-        f"✅ Active Subscriptions: {active_subs}\n\n"
-        f"⏳ Pending:\n"
-        f"  • Registrations: {pending_registrations}\n"
-        f"  • Link Requests: {pending_links}\n"
-        f"  • Unlink Requests: {pending_unlinks}\n"
-        f"  • Payments: {pending_payments}"
-    )
+    stats_text = get_watch_stats()
+    send_message(chat_id, f"📊 Overall Watch Stats\n\n{stats_text}")
 
 def handle_payments(chat_id, tg_id):
     """Handle /payments command (admin only) - show pending payment requests"""
@@ -1636,6 +1367,15 @@ def handle_subextend(chat_id, tg_id, args):
         f"⏰ Old expiry: {old_expiry}\n"
         f"⏰ New expiry: {new_expiry_str}"
     )
+    approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
+    notify_admins_notice_except(
+        tg_id,
+        f"➕ Subscription extended by {approver_label}\n\n"
+        f"User: `{username}`\n"
+        f"Days: {days}\n"
+        f"New expiry: {new_expiry_str}",
+        parse_mode="Markdown"
+    )
     
     # Notify user
     telegram_id = user.get("telegram_id")
@@ -1682,6 +1422,13 @@ def handle_subend(chat_id, tg_id, username):
         f"✅ Subscription ended!\n\n"
         f"👤 User: {username}\n"
         f"⏰ Ended at: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    )
+    approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
+    notify_admins_notice_except(
+        tg_id,
+        f"⛔ Subscription ended by {approver_label}\n\n"
+        f"User: `{username}`",
+        parse_mode="Markdown"
     )
     
     # Notify user
@@ -1737,22 +1484,21 @@ def handle_linkme(chat_id, tg_id, username_to_link, first_name):
         parse_mode="Markdown"
     )
     
-    # Notify admins
-    for admin_id in admins:
-        send_message(
-            admin_id,
-            f"🔗 Account Link Request:\n\n"
-            f"👤 Telegram Name: {first_name}\n"
-            f"🆔 Telegram ID: {tg_id}\n"
-            f"🎬 Jellyfin Username: {username_to_link}\n\n"
-            f"⚠️ User wants to link their Telegram to existing Jellyfin account.",
-            reply_markup=json.dumps({
-                "inline_keyboard": [[
-                    {"text": "✅ Approve Link", "callback_data": f"link_approve:{tg_id}"},
-                    {"text": "❌ Reject Link", "callback_data": f"link_reject:{tg_id}"}
-                ]]
-            })
-        )
+    request_key = f"link:{tg_id}"
+    notify_admins(
+        request_key,
+        f"🔗 Account Link Request:\n\n"
+        f"👤 Telegram Name: {first_name}\n"
+        f"🆔 Telegram ID: {tg_id}\n"
+        f"🎬 Jellyfin Username: {username_to_link}\n\n"
+        f"⚠️ User wants to link their Telegram to existing Jellyfin account.",
+        reply_markup=json.dumps({
+            "inline_keyboard": [[
+                {"text": "✅ Approve Link", "callback_data": f"link_approve:{tg_id}"},
+                {"text": "❌ Reject Link", "callback_data": f"link_reject:{tg_id}"}
+            ]]
+        })
+    )
     
     logging.info(f"Link request from Telegram {tg_id} to Jellyfin user {username_to_link}")
 
@@ -1784,23 +1530,73 @@ def handle_unlinkme(chat_id, tg_id):
         parse_mode="Markdown"
     )
     
-    # Notify admins
-    for admin_id in admins:
-        send_message(
-            admin_id,
-            f"🔓 Account Unlink Request:\n\n"
-            f"👤 User: {user['username']}\n"
-            f"🆔 Telegram ID: {tg_id}\n\n"
-            f"⚠️ User wants to unlink their Telegram account.",
-            reply_markup=json.dumps({
-                "inline_keyboard": [[
-                    {"text": "✅ Approve Unlink", "callback_data": f"unlink_approve:{tg_id}"},
-                    {"text": "❌ Reject Unlink", "callback_data": f"unlink_reject:{tg_id}"}
-                ]]
-            })
-        )
+    request_key = f"unlink:{tg_id}"
+    notify_admins(
+        request_key,
+        f"🔓 Account Unlink Request:\n\n"
+        f"👤 User: {user['username']}\n"
+        f"🆔 Telegram ID: {tg_id}\n\n"
+        f"⚠️ User wants to unlink their Telegram account.",
+        reply_markup=json.dumps({
+            "inline_keyboard": [[
+                {"text": "✅ Approve Unlink", "callback_data": f"unlink_approve:{tg_id}"},
+                {"text": "❌ Reject Unlink", "callback_data": f"unlink_reject:{tg_id}"}
+            ]]
+        })
+    )
     
     logging.info(f"Unlink request from user {tg_id} ({user['username']})")
+
+
+def handle_upgrade(chat_id, tg_id):
+    """Handle /upgrade command - request role upgrade"""
+    user_id, user = get_user_by_telegram_id(tg_id)
+    if not user:
+        send_message(chat_id, "❌ You are not registered.")
+        return
+
+    role = user.get("role", ROLE_REGULAR)
+    if role == ROLE_ADMIN:
+        send_message(chat_id, "👑 You are already an admin.")
+        return
+
+    if str(tg_id) in pending and pending[str(tg_id)].get("type") == "role_upgrade":
+        send_message(chat_id, "⏳ You already have a pending upgrade request. Please wait for admin approval.")
+        return
+
+    target_role = ROLE_PRIVILEGED if role == ROLE_REGULAR else ROLE_ADMIN
+    pending[str(tg_id)] = {
+        "name": user.get("name", "User"),
+        "username": user.get("username"),
+        "requested_at": int(time.time()),
+        "type": "role_upgrade",
+        "current_role": role,
+        "target_role": target_role
+    }
+    save_json(PENDING_FILE, pending)
+
+    send_message(
+        chat_id,
+        f"⬆️ Upgrade request submitted!\n\n"
+        f"Current role: {role}\n"
+        f"Requested role: {target_role}\n\n"
+        f"⏳ Please wait for an admin to approve your request."
+    )
+
+    request_key = f"role_upgrade:{tg_id}"
+    notify_admins(
+        request_key,
+        f"⬆️ Role Upgrade Request:\n\n"
+        f"👤 User: {user.get('username')}\n"
+        f"🆔 Telegram ID: {tg_id}\n"
+        f"🔼 From: {role} → {target_role}",
+        reply_markup=json.dumps({
+            "inline_keyboard": [[
+                {"text": "✅ Approve Upgrade", "callback_data": f"role_upgrade:{tg_id}"},
+                {"text": "❌ Reject Upgrade", "callback_data": f"role_upgrade_reject:{tg_id}"}
+            ]]
+        })
+    )
 
 def handle_admin_link(chat_id, tg_id, args):
     """Handle /link command (admin only) - admin links user to telegram"""
@@ -1846,6 +1642,14 @@ def handle_admin_link(chat_id, tg_id, args):
     save_json(USERS_FILE, users)
     
     send_message(chat_id, f"✅ Successfully linked!\n\n👤 User: {username_to_link}\n🆔 Telegram ID: {telegram_id_to_link}", parse_mode="Markdown")
+    approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
+    notify_admins_notice_except(
+        tg_id,
+        f"🔗 Link updated by {approver_label}\n\n"
+        f"User: `{username_to_link}`\n"
+        f"Telegram ID: {telegram_id_to_link}",
+        parse_mode="Markdown"
+    )
     
     # Notify the user
     try:
@@ -1892,6 +1696,14 @@ def handle_admin_unlink(chat_id, tg_id, args):
     save_json(USERS_FILE, users)
     
     send_message(chat_id, f"✅ Successfully unlinked!\n\n👤 User: {username_to_unlink}\n🆔 Previous Telegram ID: {old_telegram_id}", parse_mode="Markdown")
+    approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
+    notify_admins_notice_except(
+        tg_id,
+        f"🔓 Unlink updated by {approver_label}\n\n"
+        f"User: `{username_to_unlink}`\n"
+        f"Telegram ID: {old_telegram_id}",
+        parse_mode="Markdown"
+    )
     
     # Notify the user
     try:
@@ -1904,6 +1716,102 @@ def handle_admin_unlink(chat_id, tg_id, args):
         logging.warning(f"Could not notify user {old_telegram_id}: {e}")
     
     logging.info(f"Admin {tg_id} unlinked user {username_to_unlink} from Telegram {old_telegram_id}")
+
+
+def handle_admin_downgrade(chat_id, tg_id, args):
+    """Handle /downgrade command (admin only) - admin downgrades user role"""
+    if str(tg_id) not in admins:
+        send_message(chat_id, "❌ Admin access required.")
+        return
+
+    if len(args) < 2:
+        send_message(chat_id, "❌ Usage: /downgrade <username> <role>\n\nRoles: regular, privileged")
+        return
+
+    username = args[0]
+    target_role = args[1].lower()
+    if target_role not in [ROLE_REGULAR, ROLE_PRIVILEGED]:
+        send_message(chat_id, "❌ Invalid role. Use: regular or privileged.")
+        return
+
+    target_uid, user = get_user_by_username(username)
+    if not target_uid:
+        send_message(chat_id, f"❌ User '{username}' not found.")
+        return
+
+    if user.get("role") == target_role:
+        send_message(chat_id, f"ℹ️ User '{username}' is already {target_role}.")
+        return
+
+    users[target_uid]["role"] = target_role
+    users[target_uid]["is_admin"] = target_role == ROLE_ADMIN
+    save_json(USERS_FILE, users)
+
+    send_message(chat_id, f"✅ User `{username}` downgraded to {target_role}.", parse_mode="Markdown")
+    approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
+    notify_admins_notice_except(
+        tg_id,
+        f"⬇️ Role downgraded by {approver_label}\n\n"
+        f"User: `{username}`\n"
+        f"Role: {target_role}",
+        parse_mode="Markdown"
+    )
+
+    telegram_id = user.get("telegram_id")
+    if telegram_id:
+        send_message(
+            telegram_id,
+            f"⚠️ Your role has been changed by an admin.\n\n"
+            f"New role: {target_role}"
+        )
+
+
+def handle_admin_upgrade(user_id, user, tg_id):
+    current_role = user.get("role", ROLE_REGULAR)
+    if current_role == ROLE_ADMIN:
+        return False, "User is already an admin."
+
+    target_role = ROLE_PRIVILEGED if current_role == ROLE_REGULAR else ROLE_ADMIN
+    users[user_id]["role"] = target_role
+    users[user_id]["is_admin"] = target_role == ROLE_ADMIN
+    save_json(USERS_FILE, users)
+    approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
+    notify_admins_notice_except(
+        tg_id,
+        f"⬆️ Role upgraded by {approver_label}\n\n"
+        f"User: `{user.get('username')}`\n"
+        f"Role: {target_role}",
+        parse_mode="Markdown"
+    )
+    return True, target_role
+
+
+def handle_admin_delete(user_id, user, tg_id):
+    username = user.get("username", user_id)
+    if not jellyfin_delete_user(user_id, username):
+        return False
+
+    users.pop(user_id, None)
+    subscriptions.pop(user_id, None)
+    remove_username_mapping(username)
+
+    telegram_id = user.get("telegram_id")
+    if telegram_id:
+        remove_telegram_mapping(telegram_id)
+        admins.pop(str(telegram_id), None)
+
+    save_json(USERS_FILE, users)
+    save_json(SUBSCRIPTIONS_FILE, subscriptions)
+    save_json(ADMINS_FILE, admins)
+    save_json(TELEGRAM_MAPPING_FILE, telegram_to_userid)
+    approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
+    notify_admins_notice_except(
+        tg_id,
+        f"🗑️ User deleted by {approver_label}\n\n"
+        f"User: `{username}`",
+        parse_mode="Markdown"
+    )
+    return True
 
 
 
@@ -1927,6 +1835,7 @@ def handle_update(update):
             username = callback["from"].get("username", "N/A")
             first_name = callback["from"].get("first_name", "User")
             data = callback["data"]
+            is_admin = str(tg_id) in admins
             
             # Log callback query
             activity_logger.info(f"CALLBACK | User: {first_name} (@{username}) | TG_ID: {tg_id} | Data: {data}")
@@ -1978,16 +1887,115 @@ def handle_update(update):
                 )
                 
                 return
+
+            if data.startswith("user:"):
+                if not is_admin:
+                    send_message(chat_id, "❌ Admin access required.")
+                    return
+
+                user_id = data.split(":", 1)[1]
+                user = users.get(user_id)
+                if not user:
+                    send_message(chat_id, "❌ User not found.")
+                    return
+                delete_message(chat_id, callback["message"]["message_id"])
+
+                keyboard = [
+                    [{"text": "ℹ️ Sub Info", "callback_data": f"user_action:{user_id}:subinfo"}],
+                    [{"text": "➕ Extend Sub", "callback_data": f"user_action:{user_id}:subextend"}],
+                    [{"text": "⛔ End Sub", "callback_data": f"user_action:{user_id}:subend"}],
+                    [{"text": "📊 Stats", "callback_data": f"user_action:{user_id}:stats"}],
+                    [{"text": "⬆️ Upgrade", "callback_data": f"user_action:{user_id}:upgrade"}],
+                    [{"text": "⬇️ Downgrade", "callback_data": f"user_action:{user_id}:downgrade"}],
+                    [{"text": "🔗 Link TG", "callback_data": f"user_action:{user_id}:link"}],
+                    [{"text": "🔓 Unlink TG", "callback_data": f"user_action:{user_id}:unlink"}],
+                    [{"text": "🗑️ Delete User", "callback_data": f"user_action:{user_id}:delete"}],
+                ]
+
+                send_message(
+                    chat_id,
+                    f"Manage user: {user.get('username')}\nRole: {user.get('role', ROLE_REGULAR)}",
+                    reply_markup=json.dumps({"inline_keyboard": keyboard})
+                )
+                return
+
+            if data.startswith("user_action:"):
+                if not is_admin:
+                    send_message(chat_id, "❌ Admin access required.")
+                    return
+
+                _, user_id, action = data.split(":", 2)
+                user = users.get(user_id)
+                if not user:
+                    send_message(chat_id, "❌ User not found.")
+                    return
+
+                delete_message(chat_id, callback["message"]["message_id"])
+
+                username_value = user.get("username", user_id)
+
+                if action == "subinfo":
+                    delete_message(chat_id, callback["message"]["message_id"])
+                    handle_subinfo(chat_id, tg_id, username_value)
+                    return
+
+                if action == "subend":
+                    delete_message(chat_id, callback["message"]["message_id"])
+                    handle_subend(chat_id, tg_id, username_value)
+                    return
+
+                if action == "stats":
+                    delete_message(chat_id, callback["message"]["message_id"])
+                    stats_text = get_watch_stats(user_id)
+                    send_message(chat_id, f"📊 Watch Stats for {username_value}\n\n{stats_text}")
+                    return
+
+                if action == "upgrade":
+                    success, result = handle_admin_upgrade(user_id, user, tg_id)
+                    if success:
+                        delete_message(chat_id, callback["message"]["message_id"])
+                        send_message(chat_id, f"✅ User `{username_value}` upgraded to {result}.", parse_mode="Markdown")
+                        if user.get("telegram_id"):
+                            send_message(user["telegram_id"], f"✅ Your role has been upgraded to {result}.")
+                    else:
+                        send_message(chat_id, f"ℹ️ {result}")
+                    return
+
+                if action == "downgrade":
+                    set_admin_user_action(tg_id, "downgrade", user_id, callback["message"]["message_id"])
+                    send_message(chat_id, "Enter the new role: regular or privileged")
+                    return
+
+                if action == "subextend":
+                    set_admin_user_action(tg_id, "subextend", user_id, callback["message"]["message_id"])
+                    send_message(chat_id, "Enter number of days to extend the subscription:")
+                    return
+
+                if action == "link":
+                    set_admin_user_action(tg_id, "link", user_id, callback["message"]["message_id"])
+                    send_message(chat_id, "Send the Telegram ID to link to this user:")
+                    return
+
+                if action == "unlink":
+                    handle_admin_unlink(chat_id, tg_id, [username_value])
+                    return
+
+                if action == "delete":
+                    delete_message(chat_id, callback["message"]["message_id"])
+                    if handle_admin_delete(user_id, user, tg_id):
+                        send_message(chat_id, f"✅ User `{username_value}` deleted.", parse_mode="Markdown")
+                    else:
+                        send_message(chat_id, f"❌ Failed to delete `{username_value}`.", parse_mode="Markdown")
+                    return
             
             # Admin approval/rejection actions
-            is_admin = str(tg_id) in admins
-            
             if is_admin:
                 parts = data.split(":")
                 action = parts[0]
                 uid = parts[1] if len(parts) > 1 else None
                 
                 if action == "approve":
+                    request_key = f"register:{uid}"
                     with approval_lock:
                         p = pending.get(uid)
                         if not p:
@@ -2052,6 +2060,9 @@ def handle_update(update):
                         pending.pop(uid, None)
                         safe_file_save(PENDING_FILE, pending, "pending requests")
                         
+                        approver_label = f"{first_name} (@{username})" if username != "N/A" else first_name
+                        update_admin_request_buttons(request_key, "✅ Approved")
+
                         # Notify user
                         try:
                             send_message(uid_int,
@@ -2070,11 +2081,20 @@ def handle_update(update):
                         send_message(chat_id, f"✅ User `{p['username']}` approved and created successfully.\n\n"
                                     f"Jellyfin ID: {jellyfin_id}\n"
                                     f"Account is disabled until subscription.", parse_mode="Markdown")
+                        notify_admins_notice_except(
+                            tg_id,
+                            f"✅ Registration approved by {approver_label}\n\n"
+                            f"Username: `{p['username']}`\n"
+                            f"Telegram ID: {uid}",
+                            parse_mode="Markdown"
+                        )
                         logging.info(f"User {uid} ({p['username']}) approved by admin {tg_id}, jellyfin_id: {jellyfin_id}")
                 
                 elif action == "reject":
+                    request_key = f"register:{uid}"
                     p = pending.pop(uid, None)
                     if p:
+                        update_admin_request_buttons(request_key, "❌ Rejected")
                         save_json(PENDING_FILE, pending)
                         send_message(uid, "❌ Your registration request was declined.\n\nPlease contact an administrator if you believe this was a mistake.")
                         send_message(chat_id, f"✅ Registration request for `{p.get('username', 'user')}` rejected.", parse_mode="Markdown")
@@ -2084,6 +2104,7 @@ def handle_update(update):
                 
                 elif action == "reset_ok":
                     # uid here is telegram_id from callback, need to get jellyfin user_id
+                    request_key = f"reset:{uid}"
                     user_id, user = get_user_by_telegram_id(uid)
                     if not user:
                         send_message(chat_id, "❌ User not found in system.")
@@ -2091,8 +2112,16 @@ def handle_update(update):
                     
                     password = generate_password()
                     if jellyfin_reset_password(user["username"], password):
+                        approver_label = f"{first_name} (@{username})" if username != "N/A" else first_name
+                        update_admin_request_buttons(request_key, "✅ Approved")
                         send_message(uid, f"✅ Password reset approved!\n\n🔐 Your new Jellyfin password:\n\n`{password}`\n\nPlease save this securely.", parse_mode="Markdown")
                         send_message(chat_id, f"✅ Password reset for `{user['username']}` completed.", parse_mode="Markdown")
+                        notify_admins_notice_except(
+                            tg_id,
+                            f"✅ Password reset approved by {approver_label}\n\n"
+                            f"Username: `{user['username']}`",
+                            parse_mode="Markdown"
+                        )
                         logging.info(f"Password reset for user {user_id} (telegram {uid}) approved by admin {tg_id}")
                     else:
                         send_message(chat_id, f"❌ Failed to reset password for `{user['username']}`.", parse_mode="Markdown")
@@ -2100,8 +2129,10 @@ def handle_update(update):
                 
                 elif action == "reset_no":
                     # uid here is telegram_id from callback, need to get jellyfin user_id
+                    request_key = f"reset:{uid}"
                     user_id, user = get_user_by_telegram_id(uid)
                     if user:
+                        update_admin_request_buttons(request_key, "❌ Rejected")
                         send_message(uid, "❌ Your password reset request was declined.\n\nPlease contact an administrator if you need assistance.")
                         send_message(chat_id, f"✅ Password reset request for `{user['username']}` rejected.", parse_mode="Markdown")
                         logging.info(f"Password reset for user {user_id} (telegram {uid}) rejected by admin {tg_id}")
@@ -2111,6 +2142,7 @@ def handle_update(update):
                 elif action == "pay_approve":
                     # Format: pay_approve:request_id
                     request_id = uid
+                    request_key = f"pay:{request_id}"
                     
                     if request_id not in payment_requests:
                         send_message(chat_id, "⚠️ Payment request not found or already processed.")
@@ -2140,6 +2172,8 @@ def handle_update(update):
                     payment_requests[request_id]["approved_by"] = str(tg_id)
                     payment_requests[request_id]["approved_at"] = int(time.time())
                     save_json(PAYMENT_REQUESTS_FILE, payment_requests)
+                    approver_label = f"{first_name} (@{username})" if username != "N/A" else first_name
+                    update_admin_request_buttons(request_key, "✅ Approved")
                     
                     # Notify user (send to telegram_id)
                     send_message(
@@ -2162,12 +2196,21 @@ def handle_update(update):
                         f"Expires: {expiry_date}",
                         parse_mode="Markdown"
                     )
+                    notify_admins_notice_except(
+                        tg_id,
+                        f"✅ Payment approved by {approver_label}\n\n"
+                        f"Username: `{users[user_id]['username']}`\n"
+                        f"Plan: {plan['name']}\n"
+                        f"Expires: {expiry_date}",
+                        parse_mode="Markdown"
+                    )
                     
                     logging.info(f"Payment {request_id} approved by admin {tg_id} for user {user_id} (telegram_id: {telegram_id})")
                 
                 elif action == "pay_reject":
                     # Format: pay_reject:request_id
                     request_id = uid
+                    request_key = f"pay:{request_id}"
                     
                     if request_id not in payment_requests:
                         send_message(chat_id, "⚠️ Payment request not found or already processed.")
@@ -2182,6 +2225,7 @@ def handle_update(update):
                     payment_requests[request_id]["rejected_by"] = str(tg_id)
                     payment_requests[request_id]["rejected_at"] = int(time.time())
                     save_json(PAYMENT_REQUESTS_FILE, payment_requests)
+                    update_admin_request_buttons(request_key, "❌ Rejected")
                     
                     # Notify user (send to telegram_id)
                     if user_id in users:
@@ -2205,6 +2249,7 @@ def handle_update(update):
                     logging.info(f"Payment {request_id} rejected by admin {tg_id}")
                 
                 elif action == "link_approve":
+                    request_key = f"link:{uid}"
                     # Approve link request
                     if uid not in pending:
                         send_message(chat_id, "⚠️ Link request not found or already processed.")
@@ -2254,6 +2299,9 @@ def handle_update(update):
                     pending.pop(uid, None)
                     safe_file_save(PENDING_FILE, pending, "pending requests")
                     
+                    approver_label = f"{first_name} (@{username})" if username != "N/A" else first_name
+                    update_admin_request_buttons(request_key, "✅ Approved")
+
                     # Notify user
                     try:
                         send_message(
@@ -2274,13 +2322,22 @@ def handle_update(update):
                         f"👤 Jellyfin User: {users[jellyfin_user_id]['username']}",
                         parse_mode="Markdown"
                     )
+                    notify_admins_notice_except(
+                        tg_id,
+                        f"✅ Link approved by {approver_label}\n\n"
+                        f"Telegram ID: {uid}\n"
+                        f"Jellyfin User: `{users[jellyfin_user_id]['username']}`",
+                        parse_mode="Markdown"
+                    )
                     
                     logging.info(f"Link approved by admin {tg_id}: Telegram {uid} → Jellyfin {users[jellyfin_user_id]['username']}")
                 
                 elif action == "link_reject":
+                    request_key = f"link:{uid}"
                     # Reject link request
                     p = pending.pop(uid, None)
                     if p:
+                        update_admin_request_buttons(request_key, "❌ Rejected")
                         save_json(PENDING_FILE, pending)
                         send_message(uid, "❌ Your link request was declined.\n\nPlease contact an administrator if you believe this was a mistake.")
                         send_message(chat_id, f"✅ Link request rejected for Telegram ID {uid}.")
@@ -2289,6 +2346,7 @@ def handle_update(update):
                         send_message(chat_id, "⚠️ Link request not found or already processed.")
                 
                 elif action == "unlink_approve":
+                    request_key = f"unlink:{uid}"
                     # Approve unlink request
                     user_id, user = get_user_by_telegram_id(uid)
                     if not user_id:
@@ -2307,6 +2365,8 @@ def handle_update(update):
                     # Remove from pending
                     pending.pop(uid, None)
                     save_json(PENDING_FILE, pending)
+                    approver_label = f"{first_name} (@{username})" if username != "N/A" else first_name
+                    update_admin_request_buttons(request_key, "✅ Approved")
                     
                     # Notify user
                     send_message(
@@ -2325,20 +2385,74 @@ def handle_update(update):
                         f"🆔 Telegram ID: {uid}",
                         parse_mode="Markdown"
                     )
+                    notify_admins_notice_except(
+                        tg_id,
+                        f"✅ Unlink approved by {approver_label}\n\n"
+                        f"User: `{username}`\n"
+                        f"Telegram ID: {uid}",
+                        parse_mode="Markdown"
+                    )
                     
                     logging.info(f"Unlink approved by admin {tg_id} for user {username}")
                 
                 elif action == "unlink_reject":
+                    request_key = f"unlink:{uid}"
                     # Reject unlink request
                     if uid in pending:
                         username = pending[uid].get("username", "User")
                         pending.pop(uid, None)
                         save_json(PENDING_FILE, pending)
+                        update_admin_request_buttons(request_key, "❌ Rejected")
                         send_message(uid, "❌ Your unlink request was declined.\n\nPlease contact an administrator if you need assistance.")
                         send_message(chat_id, f"✅ Unlink request rejected for user {username}.")
                         logging.info(f"Unlink request rejected by admin {tg_id} for user {username}")
                     else:
                         send_message(chat_id, "⚠️ Unlink request not found or already processed.")
+                
+                elif action == "role_upgrade":
+                    request_key = f"role_upgrade:{uid}"
+                    p = pending.get(uid)
+                    if not p or p.get("type") != "role_upgrade":
+                        send_message(chat_id, "⚠️ Upgrade request not found or already processed.")
+                        return
+
+                    user_id, user = get_user_by_telegram_id(uid)
+                    if not user:
+                        send_message(chat_id, "❌ User not found in system.")
+                        return
+
+                    target_role = p.get("target_role", ROLE_PRIVILEGED)
+                    users[user_id]["role"] = target_role
+                    users[user_id]["is_admin"] = target_role == ROLE_ADMIN
+                    save_json(USERS_FILE, users)
+
+                    pending.pop(uid, None)
+                    save_json(PENDING_FILE, pending)
+                    update_admin_request_buttons(request_key, "✅ Approved")
+
+                    approver_label = f"{first_name} (@{username})" if username != "N/A" else first_name
+                    send_message(
+                        int(uid),
+                        f"✅ Your role upgrade has been approved!\n\nNew role: {target_role}"
+                    )
+                    notify_admins_notice_except(
+                        tg_id,
+                        f"✅ Role upgrade approved by {approver_label}\n\n"
+                        f"User: `{user.get('username')}`\n"
+                        f"Role: {target_role}",
+                        parse_mode="Markdown"
+                    )
+                
+                elif action == "role_upgrade_reject":
+                    request_key = f"role_upgrade:{uid}"
+                    if uid in pending and pending[uid].get("type") == "role_upgrade":
+                        pending.pop(uid, None)
+                        save_json(PENDING_FILE, pending)
+                        update_admin_request_buttons(request_key, "❌ Rejected")
+                        send_message(uid, "❌ Your role upgrade request was declined.\n\nPlease contact an administrator if you need assistance.")
+                        send_message(chat_id, "✅ Role upgrade request rejected.")
+                    else:
+                        send_message(chat_id, "⚠️ Upgrade request not found or already processed.")
 
 
         
@@ -2412,20 +2526,20 @@ def handle_update(update):
                 )
                 
                 # Notify admins
-                for admin_id in admins:
-                    send_message(
-                        admin_id,
-                        f"📨 New registration request:\n\n"
-                        f"Name: {user_data['name']}\n"
-                        f"Username: {text}\n"
-                        f"Telegram ID: {tg_id}",
-                        reply_markup=json.dumps({
-                            "inline_keyboard": [[
-                                {"text": "✅ Approve", "callback_data": f"approve:{tg_id}"},
-                                {"text": "❌ Reject", "callback_data": f"reject:{tg_id}"}
-                            ]]
-                        })
-                    )
+                request_key = f"register:{tg_id}"
+                notify_admins(
+                    request_key,
+                    f"📨 New registration request:\n\n"
+                    f"Name: {user_data['name']}\n"
+                    f"Username: {text}\n"
+                    f"Telegram ID: {tg_id}",
+                    reply_markup=json.dumps({
+                        "inline_keyboard": [[
+                            {"text": "✅ Approve", "callback_data": f"approve:{tg_id}"},
+                            {"text": "❌ Reject", "callback_data": f"reject:{tg_id}"}
+                        ]]
+                    })
+                )
                 
                 logging.info(f"Registration request from {tg_id} with username '{text}'")
                 return
@@ -2458,8 +2572,9 @@ def handle_update(update):
                         # Forward screenshot to all admins with error tracking
                         successful_sends = 0
                         failed_sends = 0
+                        request_key = f"pay:{pending_payment}"
                         for admin_id in admins:
-                            success = send_photo(
+                            message_id = send_photo(
                                 admin_id,
                                 message["photo"][-1]["file_id"],
                                 caption=f"🚨 💳 PAYMENT SCREENSHOT 💳 🚨\n\n"
@@ -2476,10 +2591,11 @@ def handle_update(update):
                                     ]]
                                 })
                             )
-                            if success:
+                            if message_id:
                                 successful_sends += 1
                             else:
                                 failed_sends += 1
+                            record_admin_request(request_key, admin_id, message_id)
                         
                         logging.info(f"PAYMENT SCREENSHOT from user {tg_id} for request {pending_payment}: sent to {successful_sends}/{len(admins)} admins")
                         
@@ -2521,9 +2637,9 @@ def handle_update(update):
                         # Video related to payment - mark as important
                         plan_id = payment_requests[pending_payment]["plan_id"]
                         plan = config["subscription_plans"][plan_id]
-                        
+                        request_key = f"pay:{pending_payment}"
                         for admin_id in admins:
-                            send_video(
+                            message_id = send_video(
                                 admin_id,
                                 message["video"]["file_id"],
                                 caption=f"🚨 💳 PAYMENT VIDEO 💳 🚨\n\n"
@@ -2540,6 +2656,7 @@ def handle_update(update):
                                     ]]
                                 })
                             )
+                            record_admin_request(request_key, admin_id, message_id)
                         logging.info(f"PAYMENT VIDEO from user {tg_id} for request {pending_payment} forwarded to admins")
                         send_message(
                             chat_id,
@@ -2564,6 +2681,87 @@ def handle_update(update):
                 # If neither photo nor video but we got here, there's an issue
                 return
             
+            if is_admin and tg_id in admin_user_actions and "text" in message and not message["text"].startswith("/"):
+                action_payload = admin_user_actions.get(tg_id, {})
+                action = action_payload.get("action")
+                target_user_id = action_payload.get("user_id")
+                source_message_id = action_payload.get("source_message_id")
+                target_user = users.get(target_user_id)
+                if not target_user:
+                    clear_admin_user_action(tg_id)
+                    send_message(chat_id, "❌ User not found.")
+                    return
+
+                text_value = message["text"].strip()
+                target_username = target_user.get("username", target_user_id)
+
+                if action == "subextend":
+                    try:
+                        days = int(text_value)
+                        if days <= 0:
+                            raise ValueError
+                    except ValueError:
+                        send_message(chat_id, "❌ Days must be a positive number.")
+                        return
+                    clear_admin_user_action(tg_id)
+                    if source_message_id:
+                        delete_message(chat_id, source_message_id)
+                    handle_subextend(chat_id, tg_id, [target_username, str(days)])
+                    return
+
+                if action == "downgrade":
+                    role_value = text_value.lower()
+                    if role_value not in [ROLE_REGULAR, ROLE_PRIVILEGED]:
+                        send_message(chat_id, "❌ Invalid role. Use: regular or privileged.")
+                        return
+                    clear_admin_user_action(tg_id)
+                    if source_message_id:
+                        delete_message(chat_id, source_message_id)
+                    handle_admin_downgrade(chat_id, tg_id, [target_username, role_value])
+                    return
+
+                if action == "link":
+                    try:
+                        telegram_id_value = int(text_value)
+                    except ValueError:
+                        send_message(chat_id, "❌ Telegram ID must be a number.")
+                        return
+                    clear_admin_user_action(tg_id)
+                    if source_message_id:
+                        delete_message(chat_id, source_message_id)
+                    handle_admin_link(chat_id, tg_id, [target_username, str(telegram_id_value)])
+                    return
+
+            if is_admin and "text" in message and message["text"].startswith("/") and message["text"].endswith("_info"):
+                command = message["text"][1:]
+                username_value = command[:-5]
+                if not username_value:
+                    return
+                user_id, user = get_user_by_username(username_value)
+                if not user_id:
+                    send_message(chat_id, f"❌ User '{username_value}' not found.")
+                    return
+                delete_message(chat_id, message.get("message_id"))
+                admin_user_actions.pop(tg_id, None)
+                # Reuse user action menu
+                keyboard = [
+                    [{"text": "ℹ️ Sub Info", "callback_data": f"user_action:{user_id}:subinfo"}],
+                    [{"text": "➕ Extend Sub", "callback_data": f"user_action:{user_id}:subextend"}],
+                    [{"text": "⛔ End Sub", "callback_data": f"user_action:{user_id}:subend"}],
+                    [{"text": "📊 Stats", "callback_data": f"user_action:{user_id}:stats"}],
+                    [{"text": "⬆️ Upgrade", "callback_data": f"user_action:{user_id}:upgrade"}],
+                    [{"text": "⬇️ Downgrade", "callback_data": f"user_action:{user_id}:downgrade"}],
+                    [{"text": "🔗 Link TG", "callback_data": f"user_action:{user_id}:link"}],
+                    [{"text": "🔓 Unlink TG", "callback_data": f"user_action:{user_id}:unlink"}],
+                    [{"text": "🗑️ Delete User", "callback_data": f"user_action:{user_id}:delete"}],
+                ]
+                send_message(
+                    chat_id,
+                    f"Manage user: {user.get('username')}\nRole: {user.get('role', ROLE_REGULAR)}",
+                    reply_markup=json.dumps({"inline_keyboard": keyboard})
+                )
+                return
+
             # Handle commands
             if "text" in message and message["text"].startswith("/"):
                 text = message["text"]
@@ -2577,6 +2775,7 @@ def handle_update(update):
                     broadcast_mode.pop(tg_id, None)
                     target_broadcast.pop(tg_id, None)
                     awaiting_username.pop(tg_id, None)
+                    clear_admin_user_action(tg_id)
                     send_message(chat_id, "✅ Cancelled.")
                     logging.info(f"User {tg_id} cancelled current operation")
                     return
@@ -2654,6 +2853,9 @@ def handle_update(update):
                 elif cmd == "/unlinkme":
                     logging.debug(f"Executing /unlinkme for user {tg_id}")
                     handle_unlinkme(chat_id, tg_id)
+                elif cmd == "/upgrade":
+                    logging.debug(f"Executing /upgrade for user {tg_id}")
+                    handle_upgrade(chat_id, tg_id)
                 elif cmd == "/link":
                     parts = text.split()
                     logging.debug(f"Executing /link for admin {tg_id} with args: {parts[1:]}")
@@ -2662,6 +2864,10 @@ def handle_update(update):
                     parts = text.split()
                     logging.debug(f"Executing /unlink for admin {tg_id} with args: {parts[1:]}")
                     handle_admin_unlink(chat_id, tg_id, parts[1:])
+                elif cmd == "/downgrade":
+                    parts = text.split()
+                    logging.debug(f"Executing /downgrade for admin {tg_id} with args: {parts[1:]}")
+                    handle_admin_downgrade(chat_id, tg_id, parts[1:])
                 else:
                     # Unknown command
                     logging.warning(f"Unknown command from user {tg_id} (@{username}): {cmd}")
@@ -2775,10 +2981,10 @@ def run():
     
     while not shutdown_flag:
         try:
-            r = requests.get(
+            r = HTTP_SESSION.get(
                 f"{TELEGRAM_API}/getUpdates",
-                params={"timeout": 60, "offset": offset},
-                timeout=70
+                params={"timeout": POLL_LONG_TIMEOUT, "offset": offset},
+                timeout=POLL_TIMEOUT
             )
             
             if r.status_code != 200:

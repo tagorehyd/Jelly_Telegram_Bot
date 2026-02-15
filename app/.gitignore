@@ -1,0 +1,14 @@
+# Runtime configuration
+config/config.json
+config/secrets.json
+
+# Application data and logs
+data/
+logs/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE settings
+.idea/
