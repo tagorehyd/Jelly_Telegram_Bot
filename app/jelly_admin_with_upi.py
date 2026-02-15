@@ -2293,7 +2293,6 @@ def handle_update(update):
 
             if data == "clean":
                 clear_chat_flow(chat_id, current_message_id=callback["message"]["message_id"])
-                handle_start(chat_id, tg_id, first_name)
                 return
 
             if data.startswith("admin_upgrade_select:"):
