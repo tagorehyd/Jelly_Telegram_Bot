@@ -1952,6 +1952,21 @@ def send_admin_role_target_picker(chat_id, action):
     send_message(chat_id, title, reply_markup=json.dumps({"inline_keyboard": keyboard}))
 
 
+def handle_admin_downgrade_target(chat_id, tg_id, user_id):
+    """Downgrade privileged users directly to regular; otherwise ask target role."""
+    user = users.get(user_id)
+    if not user:
+        send_message(chat_id, "❌ User not found.")
+        return
+
+    current_role = user.get("role", ROLE_REGULAR)
+    if current_role == ROLE_PRIVILEGED:
+        apply_admin_downgrade(chat_id, tg_id, user_id, ROLE_REGULAR)
+        return
+
+    send_admin_downgrade_role_picker(chat_id, user_id)
+
+
 def send_admin_downgrade_role_picker(chat_id, user_id):
     user = users.get(user_id)
     if not user:
@@ -2087,7 +2102,7 @@ def handle_admin_downgrade(chat_id, tg_id, args):
         return
 
     if len(args) == 1:
-        send_admin_downgrade_role_picker(chat_id, target_uid)
+        handle_admin_downgrade_target(chat_id, tg_id, target_uid)
         return
 
     target_role = args[1].lower()
@@ -2319,7 +2334,7 @@ def handle_update(update):
                     send_message(chat_id, "❌ Admin access required.")
                     return
                 user_id = data.split(":", 1)[1]
-                send_admin_downgrade_role_picker(chat_id, user_id)
+                handle_admin_downgrade_target(chat_id, tg_id, user_id)
                 return
 
             if data.startswith("admin_downgrade_role:"):
@@ -2520,7 +2535,7 @@ def handle_update(update):
                     return
 
                 if action == "downgrade":
-                    send_admin_downgrade_role_picker(chat_id, user_id)
+                    handle_admin_downgrade_target(chat_id, tg_id, user_id)
                     return
 
                 if action == "subextend":
