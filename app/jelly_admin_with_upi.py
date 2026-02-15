@@ -1216,23 +1216,30 @@ def build_library_access_menu(user_id):
         selected = set(policy.get("EnabledFolders") or [])
 
     username = user.get("username", user_id)
-    mode_label = "All libraries" if enable_all else "Custom selection"
+    if enable_all:
+        mode_label = "All libraries included"
+    elif not selected:
+        mode_label = "All libraries excluded"
+    else:
+        mode_label = "Custom selection"
+
     text = (
         f"📚 Library Access for {username}\n\n"
         f"Mode: {mode_label}\n"
         f"Selected: {len(selected)}/{len(libraries)}\n\n"
-        "Tap to toggle library access. ✅ = included, ❌ = restricted."
+        "Tap to toggle library access. 🟢 = enabled, 🔴 = disabled."
     )
 
-    keyboard = []
-    if enable_all:
-        keyboard.append([{"text": "Switch to Custom Selection", "callback_data": f"libmode:{user_id}:custom"}])
-    else:
-        keyboard.append([{"text": "Allow All Libraries", "callback_data": f"libmode:{user_id}:all"}])
+    keyboard = [
+        [
+            {"text": "🟢 Include All", "callback_data": f"libmode:{user_id}:all"},
+            {"text": "🔴 Exclude All", "callback_data": f"libmode:{user_id}:none"},
+        ]
+    ]
 
     for index, lib in enumerate(libraries):
         allowed = lib["id"] in selected
-        marker = "✅" if allowed else "❌"
+        marker = "🟢" if allowed else "🔴"
         keyboard.append([{
             "text": f"{marker} {lib.get('name', 'Unknown')}",
             "callback_data": f"libtoggle:{user_id}:{index}"
@@ -1263,6 +1270,9 @@ def apply_library_mode(user_id, mode):
     library_ids = [lib["id"] for lib in libraries]
     if mode == "all":
         policy["EnableAllFolders"] = True
+        policy["EnabledFolders"] = []
+    elif mode == "none":
+        policy["EnableAllFolders"] = False
         policy["EnabledFolders"] = []
     elif mode == "custom":
         policy["EnableAllFolders"] = False
