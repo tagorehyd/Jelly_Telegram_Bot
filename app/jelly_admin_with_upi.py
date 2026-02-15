@@ -1161,69 +1161,52 @@ def handle_users(chat_id, tg_id):
     if str(tg_id) not in admins:
         send_message(chat_id, "❌ Admin access required.")
         return
-    
+
     if not users:
         send_message(chat_id, "ℹ️ No registered users yet.")
         return
-    
-    # Create paginated user list with inline buttons
-    user_list = "👥 **Registered Users**\n\n"
-    
-    # Separate users by role
+
     admin_users = []
     privileged_users = []
     regular_users = []
-    
-    for uid, u in users.items():
-        role = u.get("role", ROLE_REGULAR)
-        if role == ROLE_ADMIN:
-            admin_users.append((uid, u))
-        elif role == ROLE_PRIVILEGED:
-            privileged_users.append((uid, u))
-        else:
-            regular_users.append((uid, u))
-    
-    # Display admins
-    if admin_users:
-        user_list += "**👑 Admins:**\n"
-        for uid, u in admin_users:
-            tg_label = f" (TG: {u['telegram_id']})" if u.get("telegram_id") else ""
-            user_list += f"👑 `{u['username']}`{tg_label}\n"
-        user_list += "\n"
-    
-    # Display privileged users
-    if privileged_users:
-        user_list += "**⭐ Privileged Users:**\n"
-        for uid, u in privileged_users:
-            tg_label = f" (TG: {u['telegram_id']})" if u.get("telegram_id") else ""
-            user_list += f"⭐ `{u['username']}`{tg_label}\n"
-        user_list += "\n"
-    
-    # Display regular users with subscription status
-    if regular_users:
-        user_list += "**👤 Regular Users:**\n"
-        for uid, u in regular_users:
-            tg_label = f" (TG: {u['telegram_id']})" if u.get("telegram_id") else ""
-            active, expires_at = check_subscription_status(uid)
-            if active and expires_at:
-                expiry_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d")
-                user_list += f"👤 `{u['username']}`{tg_label} - ✅ Active (expires {expiry_date})\n"
-            elif active and not expires_at:
-                user_list += f"👤 `{u['username']}`{tg_label} - ✅ Active (permanent)\n"
-            else:
-                user_list += f"👤 `{u['username']}`{tg_label} - ❌ Expired\n"
-    
-    user_list += f"\n📊 Total: {len(users)} users\n"
-    user_list += f"👑 Admins: {len(admin_users)}\n"
-    user_list += f"⭐ Privileged: {len(privileged_users)}\n"
-    user_list += f"👤 Regular: {len(regular_users)}\n\n"
-    user_list += "💡 Tap a user below to manage subscriptions, roles, and links."
-    
-    command_lines = [f"/{u.get('username')}_info" for _, u in users.items() if u.get("username")]
-    if command_lines:
-        user_list += "\n\n" + "\n".join(command_lines)
 
-    send_message(chat_id, user_list)
+    for uid, user in users.items():
+        role = user.get("role", ROLE_REGULAR)
+        if role == ROLE_ADMIN:
+            admin_users.append((uid, user))
+        elif role == ROLE_PRIVILEGED:
+            privileged_users.append((uid, user))
+        else:
+            regular_users.append((uid, user))
+
+    for group in (admin_users, privileged_users, regular_users):
+        group.sort(key=lambda item: item[1].get("username", "").lower())
+
+    header = "👥 Registered Users\n\n"
+    header += f"📊 Total: {len(users)} users\n"
+    header += f"👑 Admins: {len(admin_users)}\n"
+    header += f"⭐ Privileged: {len(privileged_users)}\n"
+    header += f"👤 Regular: {len(regular_users)}\n\n"
+    header += "Tap a user button below to manage subscriptions, roles, and links."
+
+    keyboard = []
+
+    for uid, user in admin_users:
+        keyboard.append([{"text": f"👑 {user.get('username', uid)}", "callback_data": f"user:{uid}"}])
+
+    for uid, user in privileged_users:
+        keyboard.append([{"text": f"⭐ {user.get('username', uid)}", "callback_data": f"user:{uid}"}])
+
+    for uid, user in regular_users:
+        active, expires_at = check_subscription_status(uid)
+        status = "✅"
+        if not active:
+            status = "❌"
+        elif expires_at:
+            status = "⏰"
+        keyboard.append([{"text": f"👤 {user.get('username', uid)} {status}", "callback_data": f"user:{uid}"}])
+
+    send_message(chat_id, header, reply_markup=json.dumps({"inline_keyboard": keyboard}))
 
 def handle_broadcast(chat_id, tg_id):
     """Handle /broadcast command (admin only)"""
