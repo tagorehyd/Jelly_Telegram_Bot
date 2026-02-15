@@ -35,6 +35,7 @@ from bot.telegram_api import (
     delete_message as delete_message_api,
     edit_message_reply_markup as edit_message_reply_markup_api,
     edit_message_text as edit_message_text_api,
+    answer_callback_query as answer_callback_query_api,
 )
 
 # -------------------------------------------------
@@ -208,6 +209,11 @@ def edit_message_reply_markup(chat_id, message_id, reply_markup):
 
 def edit_message_text(chat_id, message_id, text, reply_markup=None, parse_mode=None):
     return edit_message_text_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, chat_id, message_id, text, reply_markup, parse_mode)
+
+
+def answer_callback_query(callback_query_id, text=None, show_alert=False):
+    return answer_callback_query_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, callback_query_id, text, show_alert)
+
 
 def set_admin_user_action(tg_id, action, user_id, source_message_id=None):
     admin_user_actions[tg_id] = {
@@ -2016,6 +2022,7 @@ def handle_update(update):
         # Handle callback queries (button presses)
         if "callback_query" in update:
             callback = update["callback_query"]
+            answer_callback_query(callback.get("id"))
             chat_id = callback["message"]["chat"]["id"]
             tg_id = callback["from"]["id"]
             username = callback["from"].get("username", "N/A")
