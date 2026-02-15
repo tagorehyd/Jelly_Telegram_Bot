@@ -729,6 +729,28 @@ def enforce_regular_user_access(user_id, reason="subscription_check"):
 
     return False
 
+
+def ensure_upgraded_user_enabled(user_id, reason="role_upgrade"):
+    """Enable non-regular users after role upgrades."""
+    user = users.get(user_id)
+    if not user:
+        return False
+
+    role = user.get("role", ROLE_REGULAR)
+    if role == ROLE_REGULAR:
+        return False
+
+    username = user.get("username")
+    if not username:
+        return False
+
+    success = jellyfin_enable_user(username)
+    if validate_jellyfin_operation(f"enable user {username}", success, critical=True):
+        logging.info(f"Enabled user {user_id} ({username}) after role change to {role} ({reason})")
+        return True
+
+    return False
+
 def activate_subscription(user_id, duration_days):
     """Activate or extend subscription for a user - each day is exactly 24 hours (86400 seconds)"""
     # Validate inputs
@@ -1761,6 +1783,8 @@ def handle_admin_downgrade(chat_id, tg_id, args):
 
     if target_role == ROLE_REGULAR:
         enforce_regular_user_access(target_uid, reason="admin_downgrade")
+    else:
+        ensure_upgraded_user_enabled(target_uid, reason="admin_downgrade_to_privileged")
 
     send_message(chat_id, f"✅ User `{username}` downgraded to {target_role}.", parse_mode="Markdown")
     approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
@@ -1790,6 +1814,7 @@ def handle_admin_upgrade(user_id, user, tg_id):
     users[user_id]["role"] = target_role
     users[user_id]["is_admin"] = target_role == ROLE_ADMIN
     save_json(USERS_FILE, users)
+    ensure_upgraded_user_enabled(user_id, reason="admin_upgrade")
     approver_label = admins.get(str(tg_id), {}).get("username", str(tg_id))
     notify_admins_notice_except(
         tg_id,
@@ -2440,6 +2465,7 @@ def handle_update(update):
                     users[user_id]["role"] = target_role
                     users[user_id]["is_admin"] = target_role == ROLE_ADMIN
                     save_json(USERS_FILE, users)
+                    ensure_upgraded_user_enabled(user_id, reason="approved_upgrade_request")
 
                     pending.pop(uid, None)
                     save_json(PENDING_FILE, pending)
