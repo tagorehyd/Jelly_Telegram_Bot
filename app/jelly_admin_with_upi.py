@@ -76,6 +76,7 @@ ROLE_REGULAR = "regular"
 
 # Constants
 SECONDS_PER_DAY = 86400
+ADMIN_ACTION_TIMEOUT_SECONDS = 120
 
 shutdown_flag = False
 approval_lock = Lock()
@@ -215,11 +216,13 @@ def answer_callback_query(callback_query_id, text=None, show_alert=False):
     return answer_callback_query_api(HTTP_SESSION, HTTP_TIMEOUT, TELEGRAM_API, callback_query_id, text, show_alert)
 
 
-def set_admin_user_action(tg_id, action, user_id, source_message_id=None):
+def set_admin_user_action(tg_id, action, user_id, source_message_id=None, chat_id=None):
     admin_user_actions[tg_id] = {
         "action": action,
         "user_id": user_id,
         "source_message_id": source_message_id,
+        "chat_id": chat_id,
+        "requested_at": time.time(),
     }
 
 
@@ -1485,9 +1488,7 @@ def handle_subinfo(chat_id, tg_id, username):
         else:
             msg += f"❌ Status: Expired\n"
     
-    msg += f"\n💡 Management Commands:\n"
-    msg += f"/subextend {username} <days> - Extend subscription\n"
-    msg += f"/subend {username} - End subscription immediately"
+    msg += "\n💡 Use the user action buttons for extend/end subscription."
     
     send_message(chat_id, msg)
 
@@ -2151,6 +2152,50 @@ def handle_update(update):
                 )
                 return
 
+            if data.startswith("subextendopt:"):
+                if not is_admin:
+                    send_message(chat_id, "❌ Admin access required.")
+                    return
+
+                _, user_id, days_value = data.split(":", 2)
+                user = users.get(user_id)
+                if not user:
+                    send_message(chat_id, "❌ User not found.")
+                    return
+
+                try:
+                    days = int(days_value)
+                    if days <= 0:
+                        raise ValueError
+                except ValueError:
+                    send_message(chat_id, "❌ Invalid extension option.")
+                    return
+
+                username_value = user.get("username", user_id)
+                handle_subextend(chat_id, tg_id, [username_value, str(days)])
+                return
+
+            if data.startswith("subextendcustom:"):
+                if not is_admin:
+                    send_message(chat_id, "❌ Admin access required.")
+                    return
+
+                _, user_id = data.split(":", 1)
+                user = users.get(user_id)
+                if not user:
+                    send_message(chat_id, "❌ User not found.")
+                    return
+
+                set_admin_user_action(
+                    tg_id,
+                    "subextend_custom",
+                    user_id,
+                    source_message_id=callback["message"]["message_id"],
+                    chat_id=chat_id,
+                )
+                send_message(chat_id, "Enter custom number of days within 2 minutes.")
+                return
+
             if data.startswith("user_action:"):
                 if not is_admin:
                     send_message(chat_id, "❌ Admin access required.")
@@ -2188,17 +2233,30 @@ def handle_update(update):
                     return
 
                 if action == "downgrade":
-                    set_admin_user_action(tg_id, "downgrade", user_id, callback["message"]["message_id"])
+                    set_admin_user_action(tg_id, "downgrade", user_id, callback["message"]["message_id"], chat_id=chat_id)
                     send_message(chat_id, "Enter the new role: regular or privileged")
                     return
 
                 if action == "subextend":
-                    set_admin_user_action(tg_id, "subextend", user_id, callback["message"]["message_id"])
-                    send_message(chat_id, "Enter number of days to extend the subscription:")
+                    keyboard = [
+                        [
+                            {"text": "📅 1 Day", "callback_data": f"subextendopt:{user_id}:1"},
+                            {"text": "📅 1 Week", "callback_data": f"subextendopt:{user_id}:7"},
+                        ],
+                        [
+                            {"text": "📅 1 Month", "callback_data": f"subextendopt:{user_id}:30"},
+                            {"text": "✍️ Custom", "callback_data": f"subextendcustom:{user_id}"},
+                        ],
+                    ]
+                    send_message(
+                        chat_id,
+                        "Select how much to extend the subscription:",
+                        reply_markup=json.dumps({"inline_keyboard": keyboard})
+                    )
                     return
 
                 if action == "link":
-                    set_admin_user_action(tg_id, "link", user_id, callback["message"]["message_id"])
+                    set_admin_user_action(tg_id, "link", user_id, callback["message"]["message_id"], chat_id=chat_id)
                     send_message(chat_id, "Send the Telegram ID to link to this user:")
                     return
 
@@ -2915,7 +2973,13 @@ def handle_update(update):
                 action_payload = admin_user_actions.get(tg_id, {})
                 action = action_payload.get("action")
                 target_user_id = action_payload.get("user_id")
-                source_message_id = action_payload.get("source_message_id")
+                requested_at = action_payload.get("requested_at", 0)
+
+                if requested_at and time.time() - requested_at > ADMIN_ACTION_TIMEOUT_SECONDS:
+                    clear_admin_user_action(tg_id)
+                    send_message(chat_id, "⌛ Request timed out (2 minutes). Cancelled.")
+                    return
+
                 target_user = users.get(target_user_id)
                 if not target_user:
                     clear_admin_user_action(tg_id)
@@ -2925,17 +2989,15 @@ def handle_update(update):
                 text_value = message["text"].strip()
                 target_username = target_user.get("username", target_user_id)
 
-                if action == "subextend":
+                if action == "subextend_custom":
                     try:
                         days = int(text_value)
                         if days <= 0:
                             raise ValueError
                     except ValueError:
-                        send_message(chat_id, "❌ Days must be a positive number.")
+                        send_message(chat_id, "❌ Days must be a positive whole number.")
                         return
                     clear_admin_user_action(tg_id)
-                    if source_message_id:
-                        delete_message(chat_id, source_message_id)
                     handle_subextend(chat_id, tg_id, [target_username, str(days)])
                     return
 
@@ -2945,8 +3007,6 @@ def handle_update(update):
                         send_message(chat_id, "❌ Invalid role. Use: regular or privileged.")
                         return
                     clear_admin_user_action(tg_id)
-                    if source_message_id:
-                        delete_message(chat_id, source_message_id)
                     handle_admin_downgrade(chat_id, tg_id, [target_username, role_value])
                     return
 
@@ -2957,8 +3017,6 @@ def handle_update(update):
                         send_message(chat_id, "❌ Telegram ID must be a number.")
                         return
                     clear_admin_user_action(tg_id)
-                    if source_message_id:
-                        delete_message(chat_id, source_message_id)
                     handle_admin_link(chat_id, tg_id, [target_username, str(telegram_id_value)])
                     return
 
